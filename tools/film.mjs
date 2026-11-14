@@ -136,7 +136,7 @@ async function applyFrame({ n, fps }) {
   }
   // Pick up a villager and carry it to the new hut.
   if (t >= 44 && t < 57) {
-    rightPose = 'default';
+    rightPose = 'open';
     if (!S.grab || t < 44.05) {
       const v = api.villagerWorld(0);
       S.grab = [v[0], v[1] + 0.007, v[2]];
@@ -150,7 +150,9 @@ async function applyFrame({ n, fps }) {
     const above = [S.grab[0], S.grab[1] + 0.04, S.grab[2]];
     let p = lerp3(REST, above, seg(44, 45.5));
     p = lerp3(p, S.grab, seg(46.3, 47.3));
-    pinch = seg(47.4, 47.9) - seg(53.6, 54.0);
+    // IWER's 'default' pose drops hand tracking, and select_value alone never closes the fingers,
+    // so switch to the real pinch pose while holding.
+    if (t >= 47.6 && t < 53.8) rightPose = 'pinch';
     const lifted = [S.grab[0], S.grab[1] + 0.05, S.grab[2]];
     p = lerp3(p, lifted, seg(48.2, 49.2));
     const hutAbove = [S.hut[0], S.hut[1] + 0.04, S.hut[2]];
