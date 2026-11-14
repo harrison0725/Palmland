@@ -1,4 +1,5 @@
 import { Matrix4, Quaternion, Vector3 } from '@iwsdk/core';
+import { ALL_JOINTS } from './hand-skeleton.js';
 
 /**
  * Reads WebXR hand-tracking joints every frame and derives the few signals the
@@ -38,6 +39,9 @@ export class HandState {
   readonly indexTip = new Vector3();
   private rawOpen = 1;
   ratio = 0;
+  /** Every joint in ALL_JOINTS order; filled only when wantAllJoints is set. */
+  wantAllJoints = false;
+  readonly all: Vector3[] = ALL_JOINTS.map(() => new Vector3());
   private readonly tmpQ = new Quaternion();
   private readonly tmpV = new Vector3();
   private readonly tmpM = new Matrix4();
@@ -88,6 +92,15 @@ export class HandState {
     if (!ok) {
       this.markLost(dt);
       return;
+    }
+    if (this.wantAllJoints) {
+      for (let i = 0; i < ALL_JOINTS.length; i++) {
+        const space = hand.get(ALL_JOINTS[i] as XRHandJoint);
+        const pose = space ? frame.getJointPose?.(space, refSpace) : undefined;
+        if (!pose) continue;
+        const p = pose.transform.position;
+        this.all[i].set(p.x, p.y, p.z).applyMatrix4(origin);
+      }
     }
     this.initialised = true;
     this.tracked = true;

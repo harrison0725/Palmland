@@ -36,9 +36,26 @@ import {
   rng,
 } from './island.js';
 import { Label } from './label.js';
+import { HandSkeleton } from './hand-skeleton.js';
 import { sfx } from './sfx.js';
 
-const DEBUG = new URLSearchParams(location.search).has('debug');
+const PARAMS = new URLSearchParams(location.search);
+const DEBUG = PARAMS.has('debug');
+/** Visible stylised hands, for desktop emulation and demo recordings. */
+const SHOW_HANDS = PARAMS.has('hands') || PARAMS.has('film');
+/**
+ * Film mode: the simulation only advances when a recording script asks for a
+ * frame, by a fixed step, so slow capture still yields smooth footage.
+ */
+const FILM = PARAMS.has('film');
+interface FilmControl {
+  pending: number;
+  frames: number;
+  dt: number;
+  api: Record<string, unknown>;
+}
+const film: FilmControl | null = FILM ? { pending: 0, frames: 0, dt: 1 / 24, api: {} } : null;
+if (film) (window as unknown as { __film: FilmControl }).__film = film;
 const SAVE_KEY = 'palmlands.v1';
 const STEPS = [
   'Hold your hand out, palm up',
@@ -120,6 +137,7 @@ export class PalmSystem extends createSystem({}) {
   private wasPinching = false;
   private time = 0;
   private occludersApplied = new WeakSet<Object3D>();
+  private skeleton: HandSkeleton | null = null;
 
   // scratch (no per-frame allocation)
   private readonly v1 = new Vector3();
@@ -253,10 +271,31 @@ export class PalmSystem extends createSystem({}) {
 
     this.island.scale.setScalar(0.0001);
     window.addEventListener('pointerdown', () => sfx.unlock(), { once: true });
+    if (SHOW_HANDS) {
+      this.skeleton = new HandSkeleton();
+      this.world.createTransformEntity(this.skeleton.joints);
+      this.world.createTransformEntity(this.skeleton.bones);
+      this.hands.left.wantAllJoints = true;
+      this.hands.right.wantAllJoints = true;
+    }
+    if (film) {
+      film.api = {
+        islandToWorld: (x: number, y: number, z: number) =>
+          this.island.localToWorld(new Vector3(x, y, z)).toArray(),
+        villagerWorld: (i: number) =>
+          this.villagers[i].obj.getWorldPosition(new Vector3()).toArray(),
+        state: () => ({ step: this.save.step, trees: this.trees.length, held: this.heldIdx, night: this.night }),
+      };
+    }
   }
 
   update(delta: number): void {
-    const dt = Math.min(delta, DEBUG ? 0.4 : 0.05);
+    if (film) {
+      if (film.pending <= 0) return;
+      film.pending--;
+      film.frames++;
+    }
+    const dt = film ? film.dt : Math.min(delta, DEBUG ? 0.4 : 0.05);
     this.time += dt;
     const vis = this.world.visibilityState.peek();
     if (vis === VisibilityState.VisibleBlurred) return; // clean pause
@@ -269,7 +308,14 @@ export class PalmSystem extends createSystem({}) {
     this.originM.copy(this.world.player.matrixWorld);
     this.hands.left.update(frame, ref, this.originM, dt);
     this.hands.right.update(frame, ref, this.originM, dt);
-    if (inXR) this.applyHandOccluders();
+    if (inXR && !SHOW_HANDS) this.applyHandOccluders();
+    if (this.skeleton) {
+      (['left', 'right'] as const).forEach((side, i) => {
+        const h = this.hands[side];
+        if (h.tracked) this.skeleton!.update(i, h.all);
+        else this.skeleton!.hide(i);
+      });
+    }
 
     this.pickHomeHand();
     const home = this.home ? this.hands[this.home] : null;
@@ -304,7 +350,7 @@ export class PalmSystem extends createSystem({}) {
       root.quaternion.slerp(this.targetQuat, k);
     }
     const targetReveal = present ? 1 : 0;
-    this.reveal += (targetReveal - this.reveal) * Math.min(1, dt * (present ? 2.2 : 5));
+    this.reveal += (targetReveal - this.reveal) * Math.min(1, dt * (present ? 1.5 : 5));
     const grow = easeOutBack(this.reveal) * (inXR ? 1 : 3);
     this.island.scale.setScalar(Math.max(0.0001, grow));
     this.island.position.y = (1 - this.reveal) * -0.02;
