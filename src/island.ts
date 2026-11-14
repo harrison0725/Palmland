@@ -48,7 +48,7 @@ export const M = {
   skin: mat(0xf0c49b),
 };
 
-const villagerColors = [0xe85d75, 0x4a7fe8, 0xf2b134, 0x8a5ce8, 0x2fbf9f];
+const villagerColors = [0xe85d75, 0x4a7fe8, 0xf2b134, 0x8a5ce8, 0x2fbf9f, 0xf07a3a, 0x5cb85c, 0xd96ad1];
 
 /** Deterministic pseudo-random so every player gets the same island. */
 export function rng(seed: number) {
