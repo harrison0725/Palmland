@@ -33,6 +33,7 @@ export const sfx = {
   pop: () => tone(300, 0.08, 'triangle', 0.12, 500),
   pick: () => tone(700, 0.1, 'sine', 0.1, 200),
   drop: () => tone(500, 0.12, 'sine', 0.1, -250),
+  thud: () => tone(180, 0.09, 'triangle', 0.08, -60),
   splash: () => tone(900, 0.06, 'sine', 0.04, -600),
   chime: () => {
     [660, 830, 990, 1320].forEach((f, i) => tone(f, 0.5, 'sine', 0.08, 0, i * 0.09));

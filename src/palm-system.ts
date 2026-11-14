@@ -416,7 +416,7 @@ export class PalmSystem extends createSystem({}) {
   private updateWater(dt: number, tilt: number, present: boolean): void {
     const pouring = present && tilt > 0.5 && this.pondLevel > 0.05;
     if (pouring) {
-      this.pondLevel = Math.max(0, this.pondLevel - dt * 0.04);
+      this.pondLevel = Math.max(0, this.pondLevel - dt * 0.025);
       // Ribbon from pond centre to the rim along downhill.
       const start = this.v1.set(this.pond.position.x, 0, this.pond.position.z);
       const end = this.v2.copy(this.downhill).multiplyScalar(R * 0.98);
@@ -535,7 +535,12 @@ export class PalmSystem extends createSystem({}) {
         return;
       }
     }
-    if (!this.canPlant(tip.x, tip.z)) return;
+    if (!this.canPlant(tip.x, tip.z)) {
+      // Let the player know the poke registered even when nothing can grow there.
+      sfx.thud();
+      this.plantCooldown = 0.5;
+      return;
+    }
     const seed = Math.floor(Math.random() * 1e6);
     this.addTree(tip.x, tip.z, seed, true);
     this.save.trees.push([round4(tip.x), round4(tip.z), seed]);
@@ -681,7 +686,8 @@ export class PalmSystem extends createSystem({}) {
   private updateLabel(inXR: boolean, present: boolean): void {
     const step = Math.min(this.save.step, STEPS.length - 1);
     let text = STEPS[step];
-    if (step === 0 && !inXR) text = 'Enter mixed reality, then hold out your hand palm up';
+    if (step === 2 && this.pondLevel < 0.12) text = 'The pond ran dry. Hold your hand flat for a moment to refill it';
+    if (!inXR) text = '';
     if (!inXR && step > 0) text = '';
     if (step === 6 && this.stepTimer > 8) text = '';
     this.label.set(text);
@@ -750,6 +756,7 @@ export class PalmSystem extends createSystem({}) {
 
   private load(): void {
     try {
+      if (new URLSearchParams(location.search).has('reset')) localStorage.removeItem(SAVE_KEY);
       const raw = localStorage.getItem(SAVE_KEY);
       if (raw) this.save = { ...this.save, ...(JSON.parse(raw) as Save) };
     } catch {

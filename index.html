@@ -1,16 +1,37 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1, shrink-to-fit=no"
-    />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
     <link rel="icon" href="data:," />
-    <title>palmlands</title>
+    <title>Palmlands</title>
+    <style>
+      body { margin: 0; background: #f4efe4; font-family: system-ui, sans-serif; }
+      #intro {
+        position: fixed; left: 0; right: 0; bottom: 0; padding: 24px 16px 32px;
+        display: flex; flex-direction: column; align-items: center; gap: 10px;
+        color: #2b2a33; text-align: center; pointer-events: none;
+      }
+      #intro h1 { margin: 0; font-size: 32px; letter-spacing: 0.5px; }
+      #intro p { margin: 0; max-width: 520px; line-height: 1.4; }
+      #enter {
+        pointer-events: auto; font: 600 20px system-ui, sans-serif; color: #fff;
+        background: #3f8f4a; border: 0; border-radius: 999px; padding: 16px 34px;
+        cursor: pointer; display: none;
+      }
+      #enter:hover { background: #357a3f; }
+      #hint { font-size: 14px; opacity: 0.75; }
+      body.in-xr #intro { display: none; }
+    </style>
   </head>
-  <body style="margin: 0">
+  <body>
     <div id="scene-container"></div>
+    <div id="intro">
+      <h1>Palmlands</h1>
+      <p>A tiny world that grows on the palm of your hand.</p>
+      <button id="enter" type="button">Enter mixed reality</button>
+      <p id="hint">Checking for a headset…</p>
+    </div>
     <script type="module" src="/src/index.ts"></script>
   </body>
 </html>
