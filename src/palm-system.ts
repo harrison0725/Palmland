@@ -48,6 +48,10 @@ const SHOW_HANDS = PARAMS.has('hands') || PARAMS.has('film');
  * frame, by a fixed step, so slow capture still yields smooth footage.
  */
 const FILM = PARAMS.has('film');
+/** Pretend a calendar day has passed since the last visit (testing / demos). */
+const NEXT_DAY = PARAMS.has('nextday');
+/** Each new day after the first session, one more villager moves in, up to this many. */
+const MAX_VILLAGERS = 8;
 interface FilmControl {
   pending: number;
   frames: number;
@@ -76,6 +80,8 @@ interface Villager {
   falling: boolean;
   hop: number;
   worldVel: Vector3;
+  /** Floating down from the sky on the day they move in. */
+  arriving: boolean;
 }
 
 interface Field {
@@ -90,6 +96,7 @@ interface Save {
   trees: [number, number, number][];
   lastVisit: number;
   days: number;
+  villagers: number;
 }
 
 const FIELD_SPOTS: [number, number, number][] = [
@@ -126,7 +133,11 @@ export class PalmSystem extends createSystem({}) {
   private ambient!: AmbientLight;
   private lanternLights: PointLight[] = [];
 
-  private save: Save = { step: 0, trees: [], lastVisit: 0, days: 1 };
+  private save: Save = { step: 0, trees: [], lastVisit: 0, days: 1, villagers: 3 };
+  /** Seconds left to show the "new villager" greeting; -1 when none is pending. */
+  private arrivalLabel = -1;
+  private arrivalPending = false;
+  private inXR = false;
   private reveal = 0;
   private night = 0;
   private nightHold = 0;
@@ -197,20 +208,28 @@ export class PalmSystem extends createSystem({}) {
 
     for (const [x, z, seed] of this.save.trees) this.addTree(x, z, seed, false);
 
-    for (let i = 0; i < 3; i++) {
+    const count = film ? 3 : Math.min(MAX_VILLAGERS, Math.max(3, this.save.villagers));
+    for (let i = 0; i < count; i++) {
       const obj = buildVillager(i);
       this.content.add(obj);
       const r = rng(100 + i);
       const pos = new Vector3((r() - 0.5) * 0.03, 0, (r() - 0.5) * 0.03 + 0.01);
+      const arriving = this.arrivalPending && i === count - 1;
+      if (arriving) {
+        // Today's newcomer drifts down from above the island.
+        pos.set(0.004, 0.09, 0.012);
+        obj.position.copy(pos);
+      }
       this.villagers.push({
         obj,
         pos,
         vel: new Vector3(),
-        target: pos.clone(),
+        target: pos.clone().setY(0),
         held: false,
         falling: false,
         hop: 0,
         worldVel: new Vector3(),
+        arriving,
       });
     }
 
@@ -302,6 +321,7 @@ export class PalmSystem extends createSystem({}) {
 
     const xr = this.world.renderer.xr;
     const inXR = vis !== VisibilityState.NonImmersive && xr.isPresenting;
+    this.inXR = inXR;
     const frame = inXR ? xr.getFrame() : null;
     const ref = inXR ? xr.getReferenceSpace() : null;
     this.world.player.updateWorldMatrix(true, false);
@@ -374,7 +394,7 @@ export class PalmSystem extends createSystem({}) {
     this.updateVillagers(dt, tilt);
     this.updateGrowth(dt);
     this.updateDrops(dt);
-    this.updateLabel(inXR, present);
+    this.updateLabel(inXR, present, dt);
     this.updateSteps(dt);
     this.debugLog(god);
   }
@@ -411,6 +431,10 @@ export class PalmSystem extends createSystem({}) {
         pond: +this.pondLevel.toFixed(2),
         v0: this.villagers[0].obj.getWorldPosition(new Vector3()).toArray().map((n) => +n.toFixed(4)),
         held: this.heldIdx,
+        vn: this.villagers.length,
+        arr: this.villagers.some((v) => v.arriving),
+        greet: +this.arrivalLabel.toFixed(1),
+        days: this.save.days,
         L: this.hands.left.tracked,
         R: this.hands.right.tracked,
       }),
@@ -544,6 +568,7 @@ export class PalmSystem extends createSystem({}) {
       let best = 0.024;
       for (let i = 0; i < this.villagers.length; i++) {
         const v = this.villagers[i];
+        if (v.arriving) continue;
         const d = this.v3.copy(v.pos).setY(v.pos.y + 0.006).distanceTo(pinch);
         if (d < best) {
           best = d;
@@ -644,6 +669,28 @@ export class PalmSystem extends createSystem({}) {
         v.obj.position.copy(v.pos).setY(v.pos.y + 0.006);
         continue;
       }
+      if (v.arriving) {
+        // Wait until the player is in XR and the island has grown in, then float
+        // down with a sway. The flat-screen preview never shows the newcomer, so
+        // the moment isn't spent before the player puts the headset on.
+        v.obj.visible = this.inXR;
+        if (this.inXR && this.reveal > 0.9) {
+          v.pos.y = Math.max(0, v.pos.y - dt * 0.018);
+          v.obj.rotation.y += dt * 3;
+          v.obj.rotation.z = Math.sin(this.time * 4) * 0.25;
+          if (v.pos.y <= 0) {
+            v.arriving = false;
+            v.obj.rotation.z = 0;
+            v.hop = 1;
+            v.target.copy(v.pos);
+            this.arrivalLabel = 7;
+            sfx.pop();
+            sfx.chime();
+          }
+        }
+        v.obj.position.set(v.pos.x, 0.006 + v.pos.y, v.pos.z);
+        continue;
+      }
       if (v.falling) {
         // Fall off the island under gravity; respawn with a pop.
         v.pos.y -= dt * 0.15;
@@ -700,8 +747,9 @@ export class PalmSystem extends createSystem({}) {
   private pickWanderTarget(v: Villager, i: number): void {
     // At night villagers head home; by day they wander.
     if (this.night > 0.6) {
-      const home = i === 2 && this.save.step >= 6 ? HUT_SPOT : HOUSE_SPOT;
-      v.target.set(home.x + (i - 1) * 0.004, 0, home.z + 0.006);
+      const toHut = this.save.step >= 6 && (i === 2 || (i > 2 && i % 2 === 1));
+      const home = toHut ? HUT_SPOT : HOUSE_SPOT;
+      v.target.set(home.x + ((i % 3) - 1) * 0.004, 0, home.z + 0.006 + (i > 2 ? 0.004 : 0));
       return;
     }
     const a = Math.random() * Math.PI * 2;
@@ -729,13 +777,18 @@ export class PalmSystem extends createSystem({}) {
     this.hut.scale.setScalar(hs);
   }
 
-  private updateLabel(inXR: boolean, present: boolean): void {
+  private updateLabel(inXR: boolean, present: boolean, dt: number): void {
     const step = Math.min(this.save.step, STEPS.length - 1);
     let text = STEPS[step];
     if (step === 2 && this.pondLevel < 0.12) text = 'The pond ran dry. Hold your hand flat for a moment to refill it';
     if (!inXR) text = '';
     if (!inXR && step > 0) text = '';
     if (step === 6 && this.stepTimer > 8) text = '';
+    if (this.arrivalLabel > 0) {
+      this.arrivalLabel -= dt;
+      text = `Day ${this.save.days}: a new villager moved in! Pinch them to say hi`;
+    }
+    if (!inXR) text = '';
     this.label.set(text);
     const s = this.label.sprite;
     if (present && this.reveal > 0.3) {
@@ -808,9 +861,17 @@ export class PalmSystem extends createSystem({}) {
     } catch {
       /* private mode: play without saving */
     }
-    const today = Math.floor(Date.now() / 86400000);
-    const last = Math.floor(this.save.lastVisit / 86400000);
-    if (this.save.lastVisit && today > last) this.save.days++;
+    // Local calendar days, so "tomorrow" means after the player's midnight.
+    const dayOf = (t: number) => Math.floor((t - new Date(t).getTimezoneOffset() * 60000) / 86400000);
+    const newDay = !!this.save.lastVisit && (dayOf(Date.now()) > dayOf(this.save.lastVisit) || NEXT_DAY);
+    if (newDay) {
+      this.save.days++;
+      // Finished the first session? A new villager moves in each day.
+      if (this.save.step >= 6 && this.save.villagers < MAX_VILLAGERS && !film) {
+        this.save.villagers = Math.max(3, this.save.villagers) + 1;
+        this.arrivalPending = true;
+      }
+    }
     // Returning players skip the reveal step but keep their island.
     if (this.save.step === 0) this.save.trees = [];
     this.save.lastVisit = Date.now();
