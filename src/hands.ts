@@ -76,7 +76,7 @@ export class HandState {
       this.tmpV.set(p.x, p.y, p.z).applyMatrix4(origin);
       const target = this.get(name);
       if (!this.initialised || !this.tracked) target.copy(this.tmpV);
-      else target.lerp(this.tmpV, Math.min(1, dt * 30));
+      else target.lerp(this.tmpV, Math.min(1, dt * 22));
       if (name === 'middle-finger-metacarpal') {
         const o = pose.transform.orientation;
         this.tmpQ.set(o.x, o.y, o.z, o.w);
@@ -127,13 +127,13 @@ export class HandState {
     this.indexTip.copy(index);
     const pinchDist = thumb.distanceTo(index);
     // Hysteresis so a pinch doesn't flicker.
-    this.pinching = this.pinching ? pinchDist < 0.03 : pinchDist < 0.018;
+    this.pinching = this.pinching ? pinchDist < 0.035 : pinchDist < 0.022;
     this.pinchPoint.copy(thumb).lerp(index, 0.5);
   }
 
   private markLost(dt: number): void {
     this.lostFor += dt;
-    if (this.lostFor > 0.25) {
+    if (this.lostFor > 0.5) {
       this.tracked = false;
       this.pinching = false;
     }

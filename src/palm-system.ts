@@ -294,7 +294,7 @@ export class PalmSystem extends createSystem({}) {
       this.q1.setFromAxisAngle(this.v1.set(1, 0, 0), 0.12);
       this.targetQuat.setFromAxisAngle(this.v2.set(0, 1, 0), this.time * 0.2).premultiply(this.q1);
     }
-    const k = Math.min(1, dt * 20);
+    const k = Math.min(1, dt * 14);
     const root = this.islandEntityRoot;
     if (this.reveal < 0.01) {
       root.position.copy(this.targetPos);
@@ -376,7 +376,7 @@ export class PalmSystem extends createSystem({}) {
   private pickHomeHand(): void {
     const keep = this.home && this.hands[this.home];
     if (keep && keep.tracked && keep.palmNormal.y > -0.2) return;
-    if (keep && keep.lostFor < 0.6 && !keep.tracked) return; // brief dropout
+    if (keep && keep.lostFor < 1.2 && !keep.tracked) return; // brief dropout (e.g. the other hand occludes it)
     this.home = null;
     let best = 0.55;
     for (const s of ['left', 'right'] as const) {
@@ -495,7 +495,7 @@ export class PalmSystem extends createSystem({}) {
 
     // Pinch: pick up / carry / drop a villager.
     if (god.pinching && !this.wasPinching) {
-      let best = 0.02;
+      let best = 0.024;
       for (let i = 0; i < this.villagers.length; i++) {
         const v = this.villagers[i];
         const d = this.v3.copy(v.pos).setY(v.pos.y + 0.006).distanceTo(pinch);
@@ -522,7 +522,7 @@ export class PalmSystem extends createSystem({}) {
 
     // Poke: plant a tree where the fingertip touches the grass.
     const r = Math.hypot(tip.x, tip.z);
-    const touching = tip.y < 0.007 && tip.y > -0.006 && r < R * 0.9;
+    const touching = tip.y < 0.01 && tip.y > -0.015 && r < R * 0.92;
     if (!touching || this.plantCooldown > 0) return;
     // Poke a villager and they hop.
     for (const v of this.villagers) {
