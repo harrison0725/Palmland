@@ -2,7 +2,7 @@
 // persists in the page between chunks, so chunks must run in order.
 import fs from 'node:fs';
 
-const OUT = '/tmp/claude-0/-home-claude/7e683451-6a8e-5848-a455-384f5e96bd04/scratchpad/frames2';
+const OUT = process.env.FILM_OUT || '/tmp/claude-0/-home-user/80034bd3-a635-5e81-83a2-190886d2dd48/scratchpad/frames3';
 const FPS = 15;
 
 export default async function run({ page, frame, cdp }) {
@@ -35,7 +35,9 @@ export default async function run({ page, frame, cdp }) {
   range.next = n;
   fs.writeFileSync(OUT + '/range.json', JSON.stringify(range));
   const state = await frame.evaluate(() => window.__film.api.state());
-  return { next: n, end: range.end, state };
+  const done = await frame.evaluate(() => !!(window.__filmState && window.__filmState.done));
+  if (done) { range.end = n; fs.writeFileSync(OUT + '/range.json', JSON.stringify(range)); }
+  return { next: n, end: range.end, state, done };
 }
 
 // Runs in the page.
@@ -68,7 +70,7 @@ async function applyFrame({ n, fps }) {
   let fingers = norm(FING);
   // Rise in, later dip out and back.
   const rise = seg(0, 2.2);
-  const dip = seg(64, 66.5) - seg(68.5, 71);
+  const dip = 0;
   wrist[1] = lerp(0.78, 0.95, rise) - 0.2 * dip;
   // Tilts toward each field, then a playful tilt later.
   const tilts = [
@@ -82,7 +84,7 @@ async function applyFrame({ n, fps }) {
     const kk = seg(a, a + 1.2) - seg(a + 3.0, a + 4.2);
     if (kk > k) { k = kk; dir = fd; }
   });
-  const play = seg(57, 58.5) - seg(61.5, 63);
+  const play = 0;
   if (play > k) { k = play * 0.9; dir = [0.7, 0.714]; }
   // While rising, the palm faces inward; it turns up once in place (the reveal).
   const turn = seg(2.0, 3.2) * (1 - dip);
@@ -99,6 +101,65 @@ async function applyFrame({ n, fps }) {
     const f0 = [0, 0, -1];
     const dot = f0[0] * palm[0] + f0[1] * palm[1] + f0[2] * palm[2];
     fingers = norm([f0[0] - dot * palm[0], f0[1] - dot * palm[1], f0[2] - dot * palm[2]]);
+  }
+  // ---------- Act two: wishes, then set the island down in the room ----------
+  const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  const LREST = [-0.38, 0.72, -0.02];
+  const HEAD0 = { p: [0.0, 1.13, -0.1], pitch: -42, yaw: 3 };
+  const HEAD1 = { p: [0.0, 1.2, 0.05], pitch: -38, yaw: 0 };
+  const wi = t > 56 ? api.wish() : { type: null, wishes: 0 };
+  if (t > 56 && !S.t1 && wi.type === 'play') S.t1 = t;
+  if (S.t1 && !S.tFlip && wi.wishes >= 1 && t > S.t1 + 6) { S.tFlip = t + 1.5; }
+  if (S.tFlip && t > S.tFlip - 1 && !S.skipped) { S.skipped = true; api.setWishes(8); f.forceWish = 'tree'; }
+  if (S.tFlip && t > S.tFlip + 4 && !S.ppos && api.place().placed) S.ppos = api.place().pos;
+  if (S.ppos && !S.t2 && wi.type === 'tree' && t > S.tFlip + 6) S.t2 = t;
+  if (S.t2 && wi.wishes >= 9 && f.forceWish !== 'sleep' && !S.t3) f.forceWish = 'sleep';
+  if (S.t2 && !S.t3 && wi.type === 'sleep') S.t3 = t;
+  if (S.t3 && wi.wishes >= 10) f.forceWish = 'play';
+  if (S.tFlip) {
+    const a = S.tFlip;
+    // Turn the palm over, then take the hand away.
+    const flip = seg(a, a + 1.0);
+    const ang = flip * 2.2; // radians, rolling towards +x
+    palm = [Math.sin(ang), Math.cos(ang), 0];
+    fingers = norm([FING[0] - (FING[0] * palm[0]) * palm[0], -(FING[0] * palm[0]) * palm[1], FING[2]]);
+    wrist = lerp3(WRIST, LREST, seg(a + 1.6, a + 3.4));
+    if (S.t3 && S.ppos) {
+      // Cover the resting island with a flat hand for night, then lift away.
+      const cover = add(S.ppos, [-0.1, 0.22, -0.02]);
+      const b = S.t3 + 2;
+      wrist = lerp3(wrist, cover, seg(b, b + 1.6) - seg(b + 8.5, b + 10));
+      palm = [0, -1, 0];
+      fingers = norm(FING);
+      // Scoop it back up with an open palm.
+      const c = S.t3 + 17.5;
+      const under = add(S.ppos, [-0.03, -0.13, 0.1]);
+      const turnUp = seg(c, c + 1.2);
+      if (turnUp > 0) {
+        const an = Math.PI * (1 - turnUp);
+        palm = norm([Math.sin(an), Math.cos(an), 0.0001]);
+        const d = FING[0] * palm[0];
+        fingers = norm([FING[0] - d * palm[0], -d * palm[1], FING[2]]);
+      }
+      wrist = lerp3(wrist, under, seg(c, c + 1.5));
+      wrist = lerp3(wrist, WRIST, seg(c + 3.6, c + 5.6));
+      if (t > c + 8.5) S.done = true;
+    }
+    // Camera: sit back as the island grows, lean in for the wave, return at the end.
+    let hp = lerp3(HEAD0.p, HEAD1.p, seg(a + 1, a + 4));
+    let pitch = lerp(HEAD0.pitch, HEAD1.pitch, seg(a + 1, a + 4));
+    let yaw = lerp(HEAD0.yaw, HEAD1.yaw, seg(a + 1, a + 4));
+    if (S.t3 && S.ppos) {
+      const l = S.t3 + 12.5;
+      const lean = seg(l, l + 1.5) - seg(l + 3.8, l + 5);
+      hp = lerp3(hp, add(S.ppos, [0, 0.3, 0.3]), lean);
+      pitch = lerp(pitch, -45, lean);
+      const back = seg(S.t3 + 21, S.t3 + 23.2);
+      hp = lerp3(hp, HEAD0.p, back);
+      pitch = lerp(pitch, HEAD0.pitch, back);
+      yaw = lerp(yaw, HEAD0.yaw, back);
+    }
+    await R.dispatch('set_transform', { device: 'headset', position: P(hp), orientation: { pitch, yaw, roll: 0 } });
   }
   await R.dispatch('set_transform', { device: 'hand-left', anchor: 'wrist', position: P(wrist), orientation: { fingers, palm } });
   // Close the hand for night, open for morning.
@@ -160,6 +221,23 @@ async function applyFrame({ n, fps }) {
     p = lerp3(p, S.hutLow, seg(52, 53.4));
     p = lerp3(p, REST, seg(54.6, 56.5));
     tip = p;
+  }
+  if (S.t1 && t >= S.t1 + 1.2 && t < S.t1 + 6) {
+    // Wish one: a villager wants to play. Poke them.
+    if (wi.type === 'play') { const v = api.villagerWorld(wi.idx); S.w1 = [v[0], v[1], v[2]]; }
+    const a = S.t1 + 1.2;
+    let p = lerp3(REST, add(S.w1, [0, 0.04, 0]), seg(a, a + 1.1));
+    p = lerp3(p, add(S.w1, [0, -0.003, 0]), seg(a + 1.3, a + 1.8) - seg(a + 2.4, a + 2.9));
+    tip = lerp3(p, REST, seg(a + 3.0, a + 4.2));
+  }
+  if (S.t2 && t >= S.t2 + 1.5 && t < S.t2 + 7) {
+    // Wish two, on the resting island: a villager wants shade. Plant a tree beside them.
+    const a = S.t2 + 1.5;
+    if (wi.type === 'tree' && t < a + 1.4) { const s2 = api.plantSpotNear(wi.idx); if (s2) S.w2 = s2; }
+    if (!S.w2) { const v = api.villagerWorld(Math.max(0, wi.idx)); S.w2 = [v[0] + 0.04, v[1] - 0.02, v[2]]; }
+    let p = lerp3(REST, add(S.w2, [0, 0.1, 0]), seg(a, a + 1.2));
+    p = lerp3(p, S.w2, seg(a + 1.5, a + 2.0) - seg(a + 2.6, a + 3.1));
+    tip = lerp3(p, REST, seg(a + 3.2, a + 4.6));
   }
   if (S.rp !== rightPose) { S.rp = rightPose; await R.dispatch('set_hand_pose', { device: 'hand-right', poseId: rightPose }); }
   const pq = Math.round(pinch * 20) / 20;

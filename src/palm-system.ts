@@ -71,6 +71,8 @@ interface FilmControl {
   frames: number;
   dt: number;
   api: Record<string, unknown>;
+  /** The recording script chooses which wish comes next. */
+  forceWish?: string;
 }
 const film: FilmControl | null = FILM ? { pending: 0, frames: 0, dt: 1 / 24, api: {} } : null;
 if (film) (window as unknown as { __film: FilmControl }).__film = film;
@@ -418,7 +420,25 @@ export class PalmSystem extends createSystem({}) {
           this.island.localToWorld(new Vector3(x, y, z)).toArray(),
         villagerWorld: (i: number) =>
           this.villagers[i].obj.getWorldPosition(new Vector3()).toArray(),
-        state: () => ({ step: this.save.step, trees: this.trees.length, held: this.heldIdx, night: this.night }),
+        state: () => ({ step: this.save.step, trees: this.trees.length, held: this.heldIdx, night: this.night, wishes: this.save.wishes, placed: this.placed }),
+        wish: () => ({ type: this.wishType, idx: this.wishIdx, wishes: this.save.wishes }),
+        place: () => ({ placed: this.placed, k: this.placeK, pos: this.islandEntityRoot.position.toArray() }),
+        setWishes: (n: number) => {
+          this.save.wishes = n;
+        },
+        // A world-space spot beside villager i where a tree can be planted.
+        plantSpotNear: (i: number) => {
+          const v = this.villagers[i].pos;
+          for (let k = 0; k < 8; k++) {
+            const a = (k / 8) * Math.PI * 2;
+            const x = v.x + Math.cos(a) * 0.009;
+            const z = v.z + Math.sin(a) * 0.009;
+            if (Math.hypot(x, z) < R * 0.85 && this.canPlant(x, z)) {
+              return this.island.localToWorld(new Vector3(x, 0.002, z)).toArray();
+            }
+          }
+          return null;
+        },
       };
     }
   }
@@ -1159,7 +1179,7 @@ export class PalmSystem extends createSystem({}) {
     if (step === 2 && this.pondLevel < 0.12) text = 'The pond ran dry. Hold your hand flat for a moment to refill it';
     if (!inXR) text = '';
     if (!inXR && step > 0) text = '';
-    if (step === 6 && !film) {
+    if (step === 6) {
       // After the guided session the wishes take over the label.
       const sleepy = this.placed && this.wishType === 'sleep';
       if (this.stepTimer < 6) text = 'Your villagers have wishes now. Watch for a thought bubble';
@@ -1171,7 +1191,6 @@ export class PalmSystem extends createSystem({}) {
       else if (this.wishType && this.wishAge < 14) text = `${WISH_TEXT[this.wishType]}  \u2665 ${this.save.wishes}`;
       else text = '';
     }
-    if (step === 6 && film && this.stepTimer > 8) text = '';
     if (this.arrivalLabel > 0) {
       this.arrivalLabel -= dt;
       text = `Day ${this.save.days}: a new villager moved in! Pinch them to say hi`;
@@ -1253,7 +1272,7 @@ export class PalmSystem extends createSystem({}) {
     }
 
     if (this.wishMsgT > 0) this.wishMsgT -= dt;
-    const active = !film && this.save.step >= 6 && present && this.reveal > 0.9;
+    const active = this.save.step >= 6 && present && this.reveal > 0.9;
     if (!active) {
       this.bubble.sprite.visible = false;
       return;
@@ -1304,7 +1323,7 @@ export class PalmSystem extends createSystem({}) {
       do type = WISH_TYPES[Math.floor(Math.random() * WISH_TYPES.length)];
       while (type === this.lastWish);
     }
-    const forced = PARAMS.get('wish') as WishType | null;
+    const forced = (film?.forceWish ?? PARAMS.get('wish')) as WishType | null;
     if (forced && WISH_TYPES.includes(forced)) type = forced;
     if (type === 'tree' && this.trees.length >= 40) type = 'play';
     if (type === 'sleep' && this.night > 0.5) type = 'play';
@@ -1345,7 +1364,7 @@ export class PalmSystem extends createSystem({}) {
     sfx.chime();
     if (n === UNLOCK_FLOWERS) this.wishMsg = `Wish granted! \u2665 ${n}. Wildflowers bloom across the island`;
     else if (n === UNLOCK_LANTERNS) this.wishMsg = `Wish granted! \u2665 ${n}. The villagers put up lanterns. Close your hand to see`;
-    else if (n === UNLOCK_FESTIVAL) this.wishMsg = `\u2665 ${n}. Festival! Close your hand tonight for fireworks`;
+    else if (n === UNLOCK_FESTIVAL) this.wishMsg = `\u2665 ${n}. Festival! ${this.placed ? 'Cover the island' : 'Close your hand'} tonight for fireworks`;
     else {
       const next = n < UNLOCK_FLOWERS ? UNLOCK_FLOWERS : n < UNLOCK_LANTERNS ? UNLOCK_LANTERNS : n < UNLOCK_FESTIVAL ? UNLOCK_FESTIVAL : 0;
       this.wishMsg = next ? `Wish granted! \u2665 ${n} of ${next}` : `Wish granted! \u2665 ${n}`;
