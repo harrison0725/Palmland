@@ -38,6 +38,17 @@ import {
 import { Label } from './label.js';
 import { HandSkeleton } from './hand-skeleton.js';
 import { sfx } from './sfx.js';
+import {
+  buildFlowers,
+  buildLanternRing,
+  UNLOCK_FESTIVAL,
+  UNLOCK_FLOWERS,
+  UNLOCK_LANTERNS,
+  WISH_TEXT,
+  WISH_TYPES,
+  WishBubble,
+  WishType,
+} from './wishes.js';
 import { blobShadow, GROUND_Y, Particles, Ripples } from './fx.js';
 
 const PARAMS = new URLSearchParams(location.search);
@@ -101,6 +112,8 @@ interface Save {
   lastVisit: number;
   days: number;
   villagers: number;
+  /** Wishes granted so far: the village's happiness. */
+  wishes: number;
 }
 
 const FIELD_SPOTS: [number, number, number][] = [
@@ -108,6 +121,7 @@ const FIELD_SPOTS: [number, number, number][] = [
   [0.022, 0.022, -0.5],
   [-0.008, 0.032, 0.1],
 ];
+const FIREWORK_COLORS = [0xff6f91, 0xffd84a, 0x7ad7ff, 0xb48cff, 0x8cff9e];
 const HOUSE_SPOT = new Vector3(0.024, 0, -0.022);
 const HUT_SPOT = new Vector3(-0.028, 0, -0.02);
 
@@ -147,11 +161,27 @@ export class PalmSystem extends createSystem({}) {
   private anchorSpeed = 0;
   private anchorInit = false;
 
-  private save: Save = { step: 0, trees: [], lastVisit: 0, days: 1, villagers: 3 };
+  private save: Save = { step: 0, trees: [], lastVisit: 0, days: 1, villagers: 3, wishes: 0 };
   /** Seconds left to show the "new villager" greeting; -1 when none is pending. */
   private arrivalLabel = -1;
   private arrivalPending = false;
   private inXR = false;
+  // Villager wishes: the long-term goal after the guided first session.
+  private wishType: WishType | null = null;
+  private wishIdx = -1;
+  private wishField = -1;
+  private wishAge = 0;
+  private wishWait = 5;
+  private wishHold = 0;
+  private wishMsg = '';
+  private wishMsgT = 0;
+  private lastWish: WishType | null = null;
+  private bubble!: WishBubble;
+  private flowers!: InstancedMesh;
+  private lanternRing!: Group;
+  private flowerGrow = 0;
+  private lanternGrow = 0;
+  private fireworkT = 0;
   private reveal = 0;
   private night = 0;
   private nightHold = 0;
@@ -264,6 +294,16 @@ export class PalmSystem extends createSystem({}) {
     this.stream.visible = false;
     this.content.add(this.stream);
 
+    this.bubble = new WishBubble();
+    this.bubble.sprite.scale.setScalar(0.011);
+    this.content.add(this.bubble.sprite);
+    this.flowers = buildFlowers((x, z) => this.isOpenGrass(x, z));
+    this.content.add(this.flowers);
+    this.lanternRing = buildLanternRing();
+    this.content.add(this.lanternRing);
+    this.flowerGrow = this.save.wishes >= UNLOCK_FLOWERS ? 1 : 0;
+    this.lanternGrow = this.save.wishes >= UNLOCK_LANTERNS ? 1 : 0;
+
     this.fx = new Particles();
     this.content.add(this.fx.mesh);
     this.ripples = new Ripples();
@@ -328,6 +368,14 @@ export class PalmSystem extends createSystem({}) {
       this.world.createTransformEntity(this.skeleton.bones);
       this.hands.left.wantAllJoints = true;
       this.hands.right.wantAllJoints = true;
+    }
+    if (DEBUG) {
+      (window as unknown as { __palm: unknown }).__palm = {
+        villagerWorld: (i: number) => this.villagers[i].obj.getWorldPosition(new Vector3()).toArray(),
+        islandToWorld: (x: number, y: number, z: number) =>
+          this.island.localToWorld(new Vector3(x, y, z)).toArray(),
+        wish: () => ({ type: this.wishType, idx: this.wishIdx, wishes: this.save.wishes, night: this.night }),
+      };
     }
     if (film) {
       film.api = {
@@ -445,6 +493,7 @@ export class PalmSystem extends createSystem({}) {
     this.ripples.update(dt, 0.011 * this.pond.scale.x, 1 - Math.min(1, tilt * 2));
     this.updateLabel(inXR, present, dt);
     this.updateSteps(dt);
+    this.updateWishes(dt, present);
     this.debugLog(god);
   }
 
@@ -484,6 +533,9 @@ export class PalmSystem extends createSystem({}) {
         arr: this.villagers.some((v) => v.arriving),
         greet: +this.arrivalLabel.toFixed(1),
         days: this.save.days,
+        wish: this.wishType,
+        wi: this.wishIdx,
+        wishes: this.save.wishes,
         L: this.hands.left.tracked,
         R: this.hands.right.tracked,
       }),
@@ -553,6 +605,7 @@ export class PalmSystem extends createSystem({}) {
             sfx.pop();
             this.v3.copy(f.center).setY(GROUND_Y + 0.001);
             this.fx.burst(this.v3, 0x8fd3ff, 10, { speed: 0.025, up: 0.035, size: 0.0008 });
+            if (this.wishType === 'water' && this.fields[this.wishField] === f) this.grantWish();
           }
         }
       }
@@ -649,12 +702,15 @@ export class PalmSystem extends createSystem({}) {
     const touching = tip.y < 0.01 && tip.y > -0.015 && r < R * 0.92;
     if (!touching || this.plantCooldown > 0) return;
     // Poke a villager and they hop.
-    for (const v of this.villagers) {
-      if (Math.hypot(v.pos.x - tip.x, v.pos.z - tip.z) < 0.005) {
+    for (let i = 0; i < this.villagers.length; i++) {
+      const v = this.villagers[i];
+      const wantsPlay = this.wishType === 'play' && this.wishIdx === i;
+      if (Math.hypot(v.pos.x - tip.x, v.pos.z - tip.z) < (wantsPlay ? 0.008 : 0.005)) {
         if (v.hop <= 0) {
           v.hop = 1;
           sfx.pop();
         }
+        if (wantsPlay) this.grantWish();
         this.plantCooldown = 0.4;
         return;
       }
@@ -672,19 +728,28 @@ export class PalmSystem extends createSystem({}) {
     this.v3.set(tip.x, GROUND_Y + 0.001, tip.z);
     this.fx.burst(this.v3, 0x5fb85a, 9, { speed: 0.03, up: 0.04 });
     this.fx.burst(this.v3, 0xa8744a, 5, { speed: 0.02, up: 0.025, size: 0.0007 });
+    if (this.wishType === 'tree') {
+      const w = this.villagers[this.wishIdx];
+      if (w && Math.hypot(w.pos.x - tip.x, w.pos.z - tip.z) < 0.016) this.grantWish();
+    }
     this.save.trees.push([round4(tip.x), round4(tip.z), seed]);
     this.persist();
     this.plantCooldown = 0.6;
     sfx.plant();
   }
 
-  private canPlant(x: number, z: number): boolean {
-    if (this.trees.length >= 40) return false;
+  private isOpenGrass(x: number, z: number): boolean {
     const p = this.pond.position;
     if (Math.hypot(x - p.x, z - p.z) < 0.014) return false;
     if (Math.hypot(x - HOUSE_SPOT.x, z - HOUSE_SPOT.z) < 0.009) return false;
     if (Math.hypot(x - HUT_SPOT.x, z - HUT_SPOT.z) < 0.009) return false;
     for (const f of this.fields) if (Math.hypot(x - f.center.x, z - f.center.z) < 0.009) return false;
+    return true;
+  }
+
+  private canPlant(x: number, z: number): boolean {
+    if (this.trees.length >= 40) return false;
+    if (!this.isOpenGrass(x, z)) return false;
     for (const t of this.trees) if (Math.hypot(x - t.position.x, z - t.position.z) < 0.0065) return false;
     return true;
   }
@@ -717,6 +782,15 @@ export class PalmSystem extends createSystem({}) {
       this.fx.burst(this.v3, 0xe8dcc0, 6, { speed: 0.015, up: 0.012, size: 0.0006, life: 0.5 });
       if (this.save.step === 5 && Math.hypot(v.pos.x - HUT_SPOT.x, v.pos.z - HUT_SPOT.z) < 0.012) {
         this.advance();
+      }
+      if (this.wishType === 'friend' && this.villagers[this.wishIdx] === v) {
+        for (const o of this.villagers) {
+          if (o !== v && !o.arriving && Math.hypot(o.pos.x - v.pos.x, o.pos.z - v.pos.z) < 0.011) {
+            o.hop = 1;
+            this.grantWish();
+            break;
+          }
+        }
       }
     } else {
       v.falling = true;
@@ -866,7 +940,14 @@ export class PalmSystem extends createSystem({}) {
     if (step === 2 && this.pondLevel < 0.12) text = 'The pond ran dry. Hold your hand flat for a moment to refill it';
     if (!inXR) text = '';
     if (!inXR && step > 0) text = '';
-    if (step === 6 && this.stepTimer > 8) text = '';
+    if (step === 6 && !film) {
+      // After the guided session the wishes take over the label.
+      if (this.stepTimer < 6) text = 'Your villagers have wishes now. Watch for a thought bubble';
+      else if (this.wishMsgT > 0) text = this.wishMsg;
+      else if (this.wishType && this.wishAge < 14) text = `${WISH_TEXT[this.wishType]}  \u2665 ${this.save.wishes}`;
+      else text = '';
+    }
+    if (step === 6 && film && this.stepTimer > 8) text = '';
     if (this.arrivalLabel > 0) {
       this.arrivalLabel -= dt;
       text = `Day ${this.save.days}: a new villager moved in! Pinch them to say hi`;
@@ -917,6 +998,135 @@ export class PalmSystem extends createSystem({}) {
       sfx.grow();
       this.advance();
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Villager wishes
+
+  private updateWishes(dt: number, present: boolean): void {
+    const n = this.save.wishes;
+    // Village unlocks grow in rather than popping.
+    this.flowerGrow += ((n >= UNLOCK_FLOWERS ? 1 : 0) - this.flowerGrow) * Math.min(1, dt * 2);
+    this.lanternGrow += ((n >= UNLOCK_LANTERNS ? 1 : 0) - this.lanternGrow) * Math.min(1, dt * 2);
+    this.flowers.visible = this.flowerGrow > 0.01;
+    this.flowers.scale.set(1, Math.max(0.001, this.flowerGrow), 1);
+    this.flowers.position.y = GROUND_Y * (1 - this.flowerGrow);
+    this.lanternRing.visible = this.lanternGrow > 0.01;
+    this.lanternRing.scale.set(1, Math.max(0.001, this.lanternGrow), 1);
+    this.lanternRing.position.y = GROUND_Y * (1 - this.lanternGrow);
+    // Festival: fireworks over the island on any night once the village is happy.
+    if (n >= UNLOCK_FESTIVAL && this.night > 0.8 && present) {
+      this.fireworkT -= dt;
+      if (this.fireworkT <= 0) {
+        this.fireworkT = 0.7 + Math.random() * 0.9;
+        const a = Math.random() * Math.PI * 2;
+        const d = Math.random() * R * 0.6;
+        this.v3.set(Math.cos(a) * d, 0.04 + Math.random() * 0.025, Math.sin(a) * d);
+        const col = FIREWORK_COLORS[Math.floor(Math.random() * FIREWORK_COLORS.length)];
+        this.fx.burst(this.v3, col, 16, { speed: 0.05, up: 0.01, gravity: 0.03, life: 1.1, size: 0.0008 });
+        sfx.pop();
+      }
+    }
+
+    if (this.wishMsgT > 0) this.wishMsgT -= dt;
+    const active = !film && this.save.step >= 6 && present && this.reveal > 0.9;
+    if (!active) {
+      this.bubble.sprite.visible = false;
+      return;
+    }
+    if (!this.wishType) {
+      this.bubble.sprite.visible = false;
+      this.wishWait -= dt;
+      if (this.wishWait <= 0 && this.stepTimer > 6 && this.heldIdx < 0) this.startWish();
+      return;
+    }
+    this.wishAge += dt;
+    const v = this.villagers[this.wishIdx];
+    if (this.wishType === 'sleep') {
+      this.wishHold = this.night > 0.75 ? this.wishHold + dt : 0;
+      if (this.wishHold > 1.5) {
+        this.grantWish();
+        return;
+      }
+    }
+    if (this.wishAge > 60 || v.falling) {
+      // Unanswered wishes quietly pass; another villager asks later.
+      this.wishType = null;
+      this.wishWait = 4;
+      return;
+    }
+    const b = this.bubble.sprite;
+    b.visible = v.obj.visible;
+    const pop = Math.min(1, this.wishAge * 4);
+    b.scale.setScalar(0.011 * easeOutBack(pop));
+    if (this.wishType === 'water') {
+      const f = this.fields[this.wishField];
+      b.position.set(f.center.x, GROUND_Y + 0.013 + Math.sin(this.time * 3) * 0.0008, f.center.z);
+    } else {
+      b.position.set(v.obj.position.x, v.obj.position.y + 0.013 + Math.sin(this.time * 3) * 0.0008, v.obj.position.z);
+    }
+  }
+
+  private startWish(): void {
+    const candidates: number[] = [];
+    for (let i = 0; i < this.villagers.length; i++) {
+      const v = this.villagers[i];
+      if (!v.held && !v.falling && !v.arriving) candidates.push(i);
+    }
+    if (!candidates.length) return;
+    // The first wishes follow a fixed order so every gesture gets a purpose early.
+    let type = WISH_TYPES[this.save.wishes % WISH_TYPES.length];
+    if (this.save.wishes >= WISH_TYPES.length) {
+      do type = WISH_TYPES[Math.floor(Math.random() * WISH_TYPES.length)];
+      while (type === this.lastWish);
+    }
+    const forced = PARAMS.get('wish') as WishType | null;
+    if (forced && WISH_TYPES.includes(forced)) type = forced;
+    if (type === 'tree' && this.trees.length >= 40) type = 'play';
+    if (type === 'sleep' && this.night > 0.5) type = 'play';
+    this.wishType = type;
+    this.lastWish = type;
+    this.wishIdx = candidates[Math.floor(Math.random() * candidates.length)];
+    this.wishAge = 0;
+    this.wishHold = 0;
+    if (type === 'water') {
+      this.wishField = Math.floor(Math.random() * this.fields.length);
+      const f = this.fields[this.wishField];
+      f.wet = 0;
+      f.growth = 0;
+    }
+    this.bubble.set(type);
+    sfx.pick();
+  }
+
+  private grantWish(): void {
+    const type = this.wishType;
+    if (!type) return;
+    const v = this.villagers[this.wishIdx];
+    this.wishType = null;
+    this.wishWait = 5;
+    this.save.wishes++;
+    this.persist();
+    const n = this.save.wishes;
+    if (type === 'water') {
+      const f = this.fields[this.wishField];
+      f.growth = 1;
+      this.v3.copy(f.center).setY(GROUND_Y + 0.006);
+    } else {
+      if (v) v.hop = 1;
+      this.v3.set(v.obj.position.x, v.obj.position.y + 0.008, v.obj.position.z);
+    }
+    this.fx.burst(this.v3, 0xff6f91, 12, { speed: 0.02, up: 0.05, gravity: 0.02, life: 1.0, size: 0.0008 });
+    sfx.chime();
+    if (n === UNLOCK_FLOWERS) this.wishMsg = `Wish granted! \u2665 ${n}. Wildflowers bloom across the island`;
+    else if (n === UNLOCK_LANTERNS) this.wishMsg = `Wish granted! \u2665 ${n}. The villagers put up lanterns. Close your hand to see`;
+    else if (n === UNLOCK_FESTIVAL) this.wishMsg = `\u2665 ${n}. Festival! Close your hand tonight for fireworks`;
+    else {
+      const next = n < UNLOCK_FLOWERS ? UNLOCK_FLOWERS : n < UNLOCK_LANTERNS ? UNLOCK_LANTERNS : n < UNLOCK_FESTIVAL ? UNLOCK_FESTIVAL : 0;
+      this.wishMsg = next ? `Wish granted! \u2665 ${n} of ${next}` : `Wish granted! \u2665 ${n}`;
+    }
+    this.wishMsgT = n === UNLOCK_FLOWERS || n === UNLOCK_LANTERNS || n === UNLOCK_FESTIVAL ? 6 : 3;
+    if (n === UNLOCK_FLOWERS || n === UNLOCK_LANTERNS || n === UNLOCK_FESTIVAL) sfx.grow();
   }
 
   private advance(): void {
@@ -971,6 +1181,7 @@ export class PalmSystem extends createSystem({}) {
         this.arrivalPending = true;
       }
     }
+    if (PARAMS.has('wishes')) this.save.wishes = Number(PARAMS.get('wishes')) || 0;
     // Returning players skip the reveal step but keep their island.
     if (this.save.step === 0) this.save.trees = [];
     this.save.lastVisit = Date.now();
