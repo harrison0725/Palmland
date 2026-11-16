@@ -93,6 +93,14 @@ interface Villager {
   hop: number;
   worldVel: Vector3;
   shadow: Mesh;
+  /** Seconds left standing still before the next stroll. */
+  idle: number;
+  /** Walk-cycle phase, advanced by distance travelled so feet never slide. */
+  walk: number;
+  /** Vertical speed while dropping back onto the grass. */
+  vy: number;
+  /** Squash and stretch, eased toward 0. Positive = stretched tall. */
+  squash: number;
   /** Floating down from the sky on the day they move in. */
   arriving: boolean;
 }
@@ -166,6 +174,8 @@ export class PalmSystem extends createSystem({}) {
   private arrivalLabel = -1;
   private arrivalPending = false;
   private inXR = false;
+  private hutGrow = 0;
+  private streamK = 0;
   // Villager wishes: the long-term goal after the guided first session.
   private wishType: WishType | null = null;
   private wishIdx = -1;
@@ -234,6 +244,7 @@ export class PalmSystem extends createSystem({}) {
     this.hut.position.copy(HUT_SPOT);
     this.hut.rotation.y = 0.8;
     this.hut.add(blobShadow(0.0075));
+    this.hutGrow = this.save.step >= 5 ? 1 : 0;
     this.hut.scale.setScalar(this.save.step >= 5 ? 1 : 0.0001);
     this.content.add(this.hut);
     this.island.traverse((o) => {
@@ -285,6 +296,10 @@ export class PalmSystem extends createSystem({}) {
         hop: 0,
         worldVel: new Vector3(),
         shadow,
+        idle: Math.random() * 2,
+        walk: Math.random() * 6,
+        vy: 0,
+        squash: 0,
         arriving,
       });
     }
@@ -467,7 +482,8 @@ export class PalmSystem extends createSystem({}) {
     this.reveal += (targetReveal - this.reveal) * Math.min(1, dt * (present ? 1.5 : 5));
     const grow = easeOutBack(this.reveal) * (inXR ? 1 : 3);
     this.island.scale.setScalar(Math.max(0.0001, grow));
-    this.island.position.y = (1 - this.reveal) * -0.02;
+    // Rise out of the palm, then hover with a slow, tiny bob so it feels alive.
+    this.island.position.y = (1 - this.reveal) * -0.02 + Math.sin(this.time * 1.1) * 0.0009 * this.reveal;
     if (present && this.save.step === 0 && this.reveal > 0.9) this.advance();
 
     // ----- Day and night from how open the home hand is -----
@@ -573,7 +589,7 @@ export class PalmSystem extends createSystem({}) {
     for (let i = 0; i < this.clouds.length; i++) {
       const a = this.time * (0.12 + i * 0.05) + i * 2.5;
       const c = this.clouds[i];
-      c.position.set(Math.cos(a) * R * 0.75, 0.028 + i * 0.008, Math.sin(a) * R * 0.75);
+      c.position.set(Math.cos(a) * R * 0.75, 0.028 + i * 0.008 + Math.sin(this.time * 0.7 + i * 2) * 0.0012, Math.sin(a) * R * 0.75);
       c.rotation.y = -a;
       c.scale.setScalar(0.4 + 0.6 * (1 - this.night));
     }
@@ -592,9 +608,12 @@ export class PalmSystem extends createSystem({}) {
       const start = this.v1.set(this.pond.position.x, 0, this.pond.position.z);
       const end = this.v2.copy(this.downhill).multiplyScalar(R * 0.98);
       const len = start.distanceTo(end);
+      this.streamK = Math.min(1, this.streamK + dt * 3.5);
       this.stream.visible = true;
-      this.stream.position.copy(start).lerp(end, 0.5).setY(0.0065);
-      this.stream.scale.set(len, 1, 0.6 + Math.sin(this.time * 20) * 0.15);
+      // The stream runs out from the pond rather than appearing whole.
+      const reach = easeOutCubic(this.streamK);
+      this.stream.position.copy(start).lerp(end, 0.5 * reach).setY(0.0065);
+      this.stream.scale.set(Math.max(0.0001, len * reach), 1, (0.6 + Math.sin(this.time * 20) * 0.15) * (0.4 + 0.6 * reach));
       this.stream.rotation.set(0, Math.atan2(-(end.z - start.z), end.x - start.x), 0);
       // Water the fields the stream passes over.
       for (const f of this.fields) {
@@ -619,11 +638,15 @@ export class PalmSystem extends createSystem({}) {
         if (Math.random() < 0.15) sfx.splash();
       }
     } else {
-      this.stream.visible = false;
+      // Thin out and vanish instead of blinking off.
+      this.streamK = Math.max(0, this.streamK - dt * 4);
+      this.stream.visible = this.streamK > 0.01;
+      this.stream.scale.z = 0.6 * this.streamK;
       if (tilt < 0.3) this.pondLevel = Math.min(1, this.pondLevel + dt * 0.15);
     }
     const s = 0.35 + 0.65 * this.pondLevel;
-    this.pond.scale.set(s, s, 1);
+    const ps = this.pond.scale.x + (s - this.pond.scale.x) * (1 - Math.exp(-dt * 6));
+    this.pond.scale.set(ps, ps, 1);
     for (const f of this.fields) {
       const m = f.wet > 0.6 ? M.fieldWet : M.fieldDry;
       if (f.soil.material !== m) f.soil.material = m;
@@ -690,8 +713,16 @@ export class PalmSystem extends createSystem({}) {
       const v = this.villagers[this.heldIdx];
       if (!god.pinching) this.release();
       else {
-        v.pos.copy(pinch).setY(pinch.y - 0.0055);
-        v.obj.rotation.z = Math.sin(this.time * 18) * 0.35; // squirm
+        // Follow the pinch with a little lag so the villager dangles and swings
+        // instead of being glued to the fingers.
+        this.v3.copy(pinch).setY(pinch.y - 0.0055);
+        const lagX = this.v3.x - v.pos.x;
+        const lagZ = this.v3.z - v.pos.z;
+        v.pos.lerp(this.v3, 1 - Math.exp(-dt * 22));
+        const swing = Math.max(-0.7, Math.min(0.7, lagX * 220));
+        const swingX = Math.max(-0.7, Math.min(0.7, -lagZ * 220));
+        v.obj.rotation.z += (swing + Math.sin(this.time * 14) * 0.12 - v.obj.rotation.z) * (1 - Math.exp(-dt * 12));
+        v.obj.rotation.x += (swingX - v.obj.rotation.x) * (1 - Math.exp(-dt * 12));
       }
     }
     this.wasPinching = god.pinching;
@@ -771,7 +802,7 @@ export class PalmSystem extends createSystem({}) {
     this.heldIdx = -1;
     if (!v) return;
     v.held = false;
-    v.obj.rotation.z = 0;
+    v.vy = 0;
     const onIsland = Math.hypot(v.pos.x, v.pos.z) < R * 0.95 && v.pos.y < 0.04 && v.pos.y > -0.02;
     if (DEBUG) console.log("[palm] release", JSON.stringify({ p: v.pos.toArray(), onIsland, step: this.save.step }));
     if (onIsland) {
@@ -803,6 +834,7 @@ export class PalmSystem extends createSystem({}) {
     for (let i = 0; i < this.villagers.length; i++) {
       const v = this.villagers[i];
       if (v.held) {
+        v.obj.scale.set(0.94, 1.12, 0.94); // stretched as it dangles
         v.obj.position.copy(v.pos).setY(v.pos.y + 0.006);
         continue;
       }
@@ -832,33 +864,56 @@ export class PalmSystem extends createSystem({}) {
         continue;
       }
       if (v.falling) {
-        // Fall off the island under gravity; respawn with a pop.
-        v.pos.y -= dt * 0.15;
-        v.obj.rotation.x += dt * 8;
-        if (v.pos.y < -0.15) {
+        // Tumble off the island under gravity; respawn with a pop.
+        v.vy -= dt * 0.9;
+        v.pos.y += v.vy * dt;
+        v.obj.rotation.x += dt * 9;
+        if (v.pos.y < -0.18) {
           v.falling = false;
           v.obj.rotation.x = 0;
+          v.vy = 0;
           v.pos.set(0, 0.03, 0.01);
           sfx.pop();
         }
         v.obj.position.copy(v.pos);
         continue;
       }
-      if (v.pos.y > 0) v.pos.y = Math.max(0, v.pos.y - dt * 0.08); // settle after drop
+      const ease = 1 - Math.exp(-dt * 10);
+      v.obj.rotation.x += (0 - v.obj.rotation.x) * ease;
+      if (v.pos.y > 0) {
+        // Drop back to the grass with gravity and a soft landing squash.
+        v.vy -= dt * 0.6;
+        v.pos.y += v.vy * dt;
+        if (v.pos.y <= 0) {
+          v.pos.y = 0;
+          v.squash = -0.35;
+          v.vy = 0;
+        }
+      }
       if (sliding) {
         // Stumble downhill, stop at the rim, flail.
         v.vel.addScaledVector(this.downhill, Math.sin(tilt) * 0.05 * dt);
-        v.vel.multiplyScalar(0.92);
+        v.vel.multiplyScalar(Math.exp(-dt * 5));
         v.obj.rotation.z = Math.sin(this.time * 25 + i) * 0.4;
+        v.idle = 0;
       } else {
-        v.obj.rotation.z *= 0.8;
-        if (v.pos.distanceTo(v.target) < 0.002 || Math.random() < dt * 0.15) {
-          this.pickWanderTarget(v, i);
-        }
+        v.obj.rotation.z += (0 - v.obj.rotation.z) * ease;
         this.v3.copy(v.target).sub(v.pos).setY(0);
         const d = this.v3.length();
-        if (d > 0.0005) this.v3.multiplyScalar(0.005 / d);
-        v.vel.lerp(this.v3, Math.min(1, dt * 4));
+        if (v.idle > 0) {
+          // Stand and look around for a moment between strolls.
+          v.idle -= dt;
+          this.v3.set(0, 0, 0);
+          if (v.idle <= 0) this.pickWanderTarget(v, i);
+        } else if (d < 0.0015) {
+          v.idle = this.night > 0.6 ? 2 + Math.random() * 3 : 0.4 + Math.random() * 2.2;
+          this.v3.set(0, 0, 0);
+        } else {
+          // Ease out when arriving rather than stopping dead.
+          const speed = 0.0058 * Math.min(1, d / 0.004 + 0.25);
+          this.v3.multiplyScalar(speed / d);
+        }
+        v.vel.lerp(this.v3, 1 - Math.exp(-dt * 5));
       }
       v.pos.addScaledVector(v.vel, dt);
       const r = Math.hypot(v.pos.x, v.pos.z);
@@ -866,7 +921,7 @@ export class PalmSystem extends createSystem({}) {
       if (r > maxR) {
         v.pos.x *= maxR / r;
         v.pos.z *= maxR / r;
-        v.vel.multiplyScalar(0.3);
+        v.vel.multiplyScalar(Math.exp(-dt * 20));
       }
       // Stay out of the pond.
       const px = v.pos.x - this.pond.position.x;
@@ -877,15 +932,42 @@ export class PalmSystem extends createSystem({}) {
         v.pos.x = this.pond.position.x + (px / (pr || 1)) * pondR;
         v.pos.z = this.pond.position.z + (pz / (pr || 1)) * pondR;
       }
-      if (v.hop > 0) v.hop = Math.max(0, v.hop - dt * 3);
-      const hopY = Math.sin((1 - v.hop) * Math.PI) * 0.006 * (v.hop > 0 ? 1 : 0);
-      v.obj.position.set(v.pos.x, 0.006 + v.pos.y + hopY + Math.abs(Math.sin(this.time * 12 + i)) * 0.0006 * (sliding ? 0 : 1), v.pos.z);
-      if (v.vel.lengthSq() > 1e-8) {
+      // Hop: crouch, spring up, stretch in the air, squash on landing.
+      let hopY = 0;
+      if (v.hop > 0) {
+        const before = v.hop;
+        v.hop = Math.max(0, v.hop - dt * 2.6);
+        const t = 1 - v.hop;
+        if (t < 0.18) v.squash += (-0.3 - v.squash) * (1 - Math.exp(-dt * 30));
+        else {
+          const a = (t - 0.18) / 0.82;
+          hopY = 4 * a * (1 - a) * 0.0065;
+          v.squash += ((0.5 - a) * 0.5 - v.squash) * (1 - Math.exp(-dt * 25));
+        }
+        if (before > 0 && v.hop === 0) v.squash = -0.3;
+      }
+      // Walk cycle driven by real distance covered: a bouncy step and a lean.
+      const speedNow = Math.hypot(v.vel.x, v.vel.z);
+      v.walk += speedNow * dt * 1900;
+      const stride = Math.min(1, speedNow / 0.004);
+      const step = Math.abs(Math.sin(v.walk));
+      const bob = sliding ? 0 : step * 0.0007 * stride;
+      // Idle breathing keeps a standing villager alive.
+      const breathe = Math.sin(this.time * 2.4 + i * 1.7) * 0.03 * (1 - stride);
+      v.squash += (0 - v.squash) * (1 - Math.exp(-dt * 9));
+      const sy = 1 + v.squash + breathe + (step - 0.5) * 0.08 * stride;
+      const sxz = 1 / Math.sqrt(Math.max(0.4, sy));
+      v.obj.scale.set(sxz, sy, sxz);
+      v.obj.position.set(v.pos.x, 0.006 + v.pos.y + hopY + bob, v.pos.z);
+      if (speedNow > 0.0006) {
         // Turn smoothly toward the walking direction instead of snapping.
         const want = Math.atan2(v.vel.x, v.vel.z);
-        let d = want - v.obj.rotation.y;
-        d = Math.atan2(Math.sin(d), Math.cos(d));
-        v.obj.rotation.y += d * Math.min(1, dt * 10);
+        let dd = want - v.obj.rotation.y;
+        dd = Math.atan2(Math.sin(dd), Math.cos(dd));
+        v.obj.rotation.y += dd * (1 - Math.exp(-dt * 8));
+      } else if (v.idle > 0 && !sliding) {
+        // Glance from side to side while standing.
+        v.obj.rotation.y += Math.sin(this.time * 0.9 + i * 2.1) * dt * 0.5;
       }
     }
   }
@@ -921,6 +1003,10 @@ export class PalmSystem extends createSystem({}) {
         t.userData.grow = Math.min(1, g + dt * 2.5);
         t.scale.setScalar(Math.max(0.001, easeOutBack(t.userData.grow)));
       }
+      // A light breeze: each tree leans on its own phase.
+      const ph = t.position.x * 140 + t.position.z * 90;
+      t.rotation.z = Math.sin(this.time * 1.3 + ph) * 0.045;
+      t.rotation.x = Math.sin(this.time * 1.05 + ph * 1.7) * 0.035;
     }
     // Wet fields grow crops at night; growth snaps to full on sunrise.
     for (const f of this.fields) {
@@ -929,9 +1015,9 @@ export class PalmSystem extends createSystem({}) {
       // Crops sway gently once grown.
       f.crops.scale.set(s, s * (1 + Math.sin(this.time * 2.2 + f.center.x * 200) * 0.06 * f.growth), s);
     }
-    const hutTarget = this.save.step >= 5 ? 1 : 0.0001;
-    const hs = this.hut.scale.x + (hutTarget - this.hut.scale.x) * Math.min(1, dt * 3);
-    this.hut.scale.setScalar(hs);
+    // The hut builds itself with a springy pop.
+    this.hutGrow = Math.min(1, Math.max(0, this.hutGrow + (this.save.step >= 5 ? dt * 1.4 : -dt * 3)));
+    this.hut.scale.setScalar(Math.max(0.0001, easeOutBack(this.hutGrow)));
   }
 
   private updateLabel(inXR: boolean, present: boolean, dt: number): void {
@@ -1202,6 +1288,11 @@ function easeOutBack(t: number): number {
   const c3 = c1 + 1;
   const x = Math.min(1, Math.max(0, t));
   return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+}
+
+function easeOutCubic(t: number): number {
+  const x = 1 - Math.min(1, Math.max(0, t));
+  return 1 - x * x * x;
 }
 
 function round4(n: number): number {
