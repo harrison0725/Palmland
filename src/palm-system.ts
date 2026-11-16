@@ -38,6 +38,7 @@ import {
 import { Label } from './label.js';
 import { HandSkeleton } from './hand-skeleton.js';
 import { sfx } from './sfx.js';
+import { blobShadow, GROUND_Y, Particles, Ripples } from './fx.js';
 
 const PARAMS = new URLSearchParams(location.search);
 const DEBUG = PARAMS.has('debug');
@@ -80,12 +81,15 @@ interface Villager {
   falling: boolean;
   hop: number;
   worldVel: Vector3;
+  shadow: Mesh;
   /** Floating down from the sky on the day they move in. */
   arriving: boolean;
 }
 
 interface Field {
   obj: Group;
+  soil: Mesh;
+  crops: Object3D;
   center: Vector3;
   wet: number;
   growth: number;
@@ -132,6 +136,16 @@ export class PalmSystem extends createSystem({}) {
   private hemi!: HemisphereLight;
   private ambient!: AmbientLight;
   private lanternLights: PointLight[] = [];
+  private fx!: Particles;
+  private ripples!: Ripples;
+  /** Label fade state: what is drawn now, and its opacity. */
+  private labelShown = '';
+  private labelAlpha = 0;
+  /** Adaptive (one-euro style) smoothing of the palm anchor. */
+  private readonly prevTargetPos = new Vector3();
+  private readonly prevTargetQuat = new Quaternion();
+  private anchorSpeed = 0;
+  private anchorInit = false;
 
   private save: Save = { step: 0, trees: [], lastVisit: 0, days: 1, villagers: 3 };
   /** Seconds left to show the "new villager" greeting; -1 when none is pending. */
@@ -183,11 +197,13 @@ export class PalmSystem extends createSystem({}) {
     this.house = buildHouse();
     this.house.position.copy(HOUSE_SPOT);
     this.house.rotation.y = -0.6;
+    this.house.add(blobShadow(0.0075));
     this.content.add(this.house);
 
     this.hut = buildHouse();
     this.hut.position.copy(HUT_SPOT);
     this.hut.rotation.y = 0.8;
+    this.hut.add(blobShadow(0.0075));
     this.hut.scale.setScalar(this.save.step >= 5 ? 1 : 0.0001);
     this.content.add(this.hut);
     this.island.traverse((o) => {
@@ -199,7 +215,14 @@ export class PalmSystem extends createSystem({}) {
       f.position.set(x, 0.006, z);
       f.rotation.y = ry;
       this.content.add(f);
-      this.fields.push({ obj: f, center: new Vector3(x, 0, z), wet: 0, growth: 0 });
+      this.fields.push({
+        obj: f,
+        soil: f.getObjectByName('soil') as Mesh,
+        crops: f.getObjectByName('crops')!,
+        center: new Vector3(x, 0, z),
+        wet: 0,
+        growth: 0,
+      });
     }
     if (this.save.step >= 4) for (const f of this.fields) {
       f.wet = 1;
@@ -212,6 +235,8 @@ export class PalmSystem extends createSystem({}) {
     for (let i = 0; i < count; i++) {
       const obj = buildVillager(i);
       this.content.add(obj);
+      const shadow = blobShadow(0.0017);
+      this.content.add(shadow);
       const r = rng(100 + i);
       const pos = new Vector3((r() - 0.5) * 0.03, 0, (r() - 0.5) * 0.03 + 0.01);
       const arriving = this.arrivalPending && i === count - 1;
@@ -229,6 +254,7 @@ export class PalmSystem extends createSystem({}) {
         falling: false,
         hop: 0,
         worldVel: new Vector3(),
+        shadow,
         arriving,
       });
     }
@@ -237,6 +263,12 @@ export class PalmSystem extends createSystem({}) {
     this.stream = new Mesh(new BoxGeometry(1, 0.0012, 0.004), M.water);
     this.stream.visible = false;
     this.content.add(this.stream);
+
+    this.fx = new Particles();
+    this.content.add(this.fx.mesh);
+    this.ripples = new Ripples();
+    this.ripples.group.position.set(this.pond.position.x, GROUND_Y + 0.0004, this.pond.position.z);
+    this.content.add(this.ripples.group);
 
     // Droplets fall in world space, so they live on the scene root.
     const dropCount = 120;
@@ -360,7 +392,21 @@ export class PalmSystem extends createSystem({}) {
       this.q1.setFromAxisAngle(this.v1.set(1, 0, 0), 0.12);
       this.targetQuat.setFromAxisAngle(this.v2.set(0, 1, 0), this.time * 0.2).premultiply(this.q1);
     }
-    const k = Math.min(1, dt * 14);
+    // One-euro style filter: heavy smoothing while the hand is still (hides
+    // tracking jitter), light smoothing when it moves (no rubber-band lag).
+    if (!this.anchorInit) {
+      this.prevTargetPos.copy(this.targetPos);
+      this.prevTargetQuat.copy(this.targetQuat);
+      this.anchorInit = true;
+    }
+    const linSpeed = this.prevTargetPos.distanceTo(this.targetPos) / Math.max(dt, 1e-4);
+    const angSpeed = this.prevTargetQuat.angleTo(this.targetQuat) / Math.max(dt, 1e-4);
+    this.prevTargetPos.copy(this.targetPos);
+    this.prevTargetQuat.copy(this.targetQuat);
+    const rawSpeed = linSpeed + angSpeed * 0.05; // 1 rad/s counts like 5 cm/s
+    this.anchorSpeed += (rawSpeed - this.anchorSpeed) * Math.min(1, dt * 20);
+    const cutoff = 2.2 + this.anchorSpeed * 60; // Hz
+    const k = 1 - Math.exp(-2 * Math.PI * cutoff * dt);
     const root = this.islandEntityRoot;
     if (this.reveal < 0.01) {
       root.position.copy(this.targetPos);
@@ -392,8 +438,11 @@ export class PalmSystem extends createSystem({}) {
     this.updateWater(dt, tilt, present);
     this.updateGodFinger(dt, god, present);
     this.updateVillagers(dt, tilt);
+    this.updateVillagerShadows();
     this.updateGrowth(dt);
     this.updateDrops(dt);
+    this.fx.update(dt);
+    this.ripples.update(dt, 0.011 * this.pond.scale.x, 1 - Math.min(1, tilt * 2));
     this.updateLabel(inXR, present, dt);
     this.updateSteps(dt);
     this.debugLog(god);
@@ -500,7 +549,11 @@ export class PalmSystem extends createSystem({}) {
         if (distToSegment(f.center, start, end) < 0.01) {
           const before = f.wet;
           f.wet = Math.min(1, f.wet + dt * 0.8);
-          if (before < 1 && f.wet >= 1) sfx.pop();
+          if (before < 1 && f.wet >= 1) {
+            sfx.pop();
+            this.v3.copy(f.center).setY(GROUND_Y + 0.001);
+            this.fx.burst(this.v3, 0x8fd3ff, 10, { speed: 0.025, up: 0.035, size: 0.0008 });
+          }
         }
       }
       // Spill droplets off the rim into the real world.
@@ -519,8 +572,8 @@ export class PalmSystem extends createSystem({}) {
     const s = 0.35 + 0.65 * this.pondLevel;
     this.pond.scale.set(s, s, 1);
     for (const f of this.fields) {
-      const soil = f.obj.getObjectByName('soil') as Mesh;
-      soil.material = f.wet > 0.6 ? M.fieldWet : M.fieldDry;
+      const m = f.wet > 0.6 ? M.fieldWet : M.fieldDry;
+      if (f.soil.material !== m) f.soil.material = m;
     }
   }
 
@@ -609,11 +662,16 @@ export class PalmSystem extends createSystem({}) {
     if (!this.canPlant(tip.x, tip.z)) {
       // Let the player know the poke registered even when nothing can grow there.
       sfx.thud();
+      this.v3.set(tip.x, GROUND_Y + 0.0005, tip.z);
+      this.fx.burst(this.v3, 0xc9b48a, 4, { speed: 0.012, up: 0.012, size: 0.0006, life: 0.4 });
       this.plantCooldown = 0.5;
       return;
     }
     const seed = Math.floor(Math.random() * 1e6);
     this.addTree(tip.x, tip.z, seed, true);
+    this.v3.set(tip.x, GROUND_Y + 0.001, tip.z);
+    this.fx.burst(this.v3, 0x5fb85a, 9, { speed: 0.03, up: 0.04 });
+    this.fx.burst(this.v3, 0xa8744a, 5, { speed: 0.02, up: 0.025, size: 0.0007 });
     this.save.trees.push([round4(tip.x), round4(tip.z), seed]);
     this.persist();
     this.plantCooldown = 0.6;
@@ -634,6 +692,9 @@ export class PalmSystem extends createSystem({}) {
   private addTree(x: number, z: number, seed: number, animate: boolean): void {
     const t = buildTree(seed);
     t.position.set(x, 0.006, z);
+    const sh = blobShadow(0.0034);
+    sh.position.y = GROUND_Y - 0.006 + 0.0001;
+    t.add(sh);
     t.userData.grow = animate ? 0 : 1;
     t.scale.setScalar(animate ? 0.001 : 1);
     this.content.add(t);
@@ -652,6 +713,8 @@ export class PalmSystem extends createSystem({}) {
       v.pos.y = Math.max(0, v.pos.y);
       v.target.copy(v.pos).setY(0);
       sfx.drop();
+      this.v3.set(v.pos.x, GROUND_Y + 0.0005, v.pos.z);
+      this.fx.burst(this.v3, 0xe8dcc0, 6, { speed: 0.015, up: 0.012, size: 0.0006, life: 0.5 });
       if (this.save.step === 5 && Math.hypot(v.pos.x - HUT_SPOT.x, v.pos.z - HUT_SPOT.z) < 0.012) {
         this.advance();
       }
@@ -684,6 +747,9 @@ export class PalmSystem extends createSystem({}) {
             v.hop = 1;
             v.target.copy(v.pos);
             this.arrivalLabel = 7;
+            this.v3.set(v.pos.x, GROUND_Y + 0.002, v.pos.z);
+            this.fx.burst(this.v3, 0xf2b134, 10, { speed: 0.03, up: 0.05 });
+            this.fx.burst(this.v3, 0xe85d75, 8, { speed: 0.03, up: 0.05 });
             sfx.pop();
             sfx.chime();
           }
@@ -740,7 +806,24 @@ export class PalmSystem extends createSystem({}) {
       if (v.hop > 0) v.hop = Math.max(0, v.hop - dt * 3);
       const hopY = Math.sin((1 - v.hop) * Math.PI) * 0.006 * (v.hop > 0 ? 1 : 0);
       v.obj.position.set(v.pos.x, 0.006 + v.pos.y + hopY + Math.abs(Math.sin(this.time * 12 + i)) * 0.0006 * (sliding ? 0 : 1), v.pos.z);
-      if (v.vel.lengthSq() > 1e-8) v.obj.rotation.y = Math.atan2(v.vel.x, v.vel.z);
+      if (v.vel.lengthSq() > 1e-8) {
+        // Turn smoothly toward the walking direction instead of snapping.
+        const want = Math.atan2(v.vel.x, v.vel.z);
+        let d = want - v.obj.rotation.y;
+        d = Math.atan2(Math.sin(d), Math.cos(d));
+        v.obj.rotation.y += d * Math.min(1, dt * 10);
+      }
+    }
+  }
+
+  private updateVillagerShadows(): void {
+    for (const v of this.villagers) {
+      const o = v.obj.position;
+      const h = Math.max(0, o.y - 0.006);
+      const onIsland = Math.hypot(o.x, o.z) < R * 0.97 && o.y > -0.005;
+      v.shadow.visible = v.obj.visible && onIsland && !v.falling;
+      v.shadow.position.set(o.x, GROUND_Y + 0.0001, o.z);
+      v.shadow.scale.setScalar(0.0017 / (1 + h * 35));
     }
   }
 
@@ -768,9 +851,9 @@ export class PalmSystem extends createSystem({}) {
     // Wet fields grow crops at night; growth snaps to full on sunrise.
     for (const f of this.fields) {
       if (f.wet > 0.6 && this.night > 0.5) f.growth = Math.min(1, f.growth + dt * 0.5);
-      const crops = f.obj.getObjectByName('crops')!;
       const s = Math.max(0.001, easeOutBack(f.growth));
-      crops.scale.setScalar(s);
+      // Crops sway gently once grown.
+      f.crops.scale.set(s, s * (1 + Math.sin(this.time * 2.2 + f.center.x * 200) * 0.06 * f.growth), s);
     }
     const hutTarget = this.save.step >= 5 ? 1 : 0.0001;
     const hs = this.hut.scale.x + (hutTarget - this.hut.scale.x) * Math.min(1, dt * 3);
@@ -789,21 +872,33 @@ export class PalmSystem extends createSystem({}) {
       text = `Day ${this.save.days}: a new villager moved in! Pinch them to say hi`;
     }
     if (!inXR) text = '';
-    this.label.set(text);
+    // Fade out the old message before showing a new one, then fade it in.
+    if (text !== this.labelShown) {
+      this.labelAlpha = Math.max(0, this.labelAlpha - dt * 6);
+      if (this.labelAlpha <= 0) {
+        this.labelShown = text;
+        this.label.set(text);
+      }
+    } else if (text) {
+      this.labelAlpha = Math.min(1, this.labelAlpha + dt * 4);
+    }
+    this.label.setOpacity(this.labelAlpha);
+    this.label.setPop(0.85 + 0.15 * easeOutBack(this.labelAlpha));
     const s = this.label.sprite;
+    const follow = 1 - Math.exp(-dt * 12);
     if (present && this.reveal > 0.3) {
       this.v1.set(0, 0.075 * (inXR ? 1 : 3), 0);
       this.island.localToWorld(this.v1.multiplyScalar(1 / this.island.scale.x));
-      s.position.lerp(this.v1, 0.2);
+      s.position.lerp(this.v1, follow);
     } else {
       // Float in front of the viewer when there's no island yet.
       this.world.camera.getWorldPosition(this.v1);
       this.world.camera.getWorldDirection(this.v2);
       this.v1.addScaledVector(this.v2, 0.5);
       this.v1.y -= 0.12;
-      s.position.lerp(this.v1, 0.15);
+      s.position.lerp(this.v1, follow);
     }
-    s.visible = text !== '';
+    s.visible = this.labelAlpha > 0.01 && this.labelShown !== '';
   }
 
   private updateSteps(dt: number): void {
@@ -828,7 +923,11 @@ export class PalmSystem extends createSystem({}) {
     if (this.save.step >= STEPS.length - 1) return;
     this.save.step++;
     this.stepTimer = 0;
-    if (this.save.step > 1) sfx.chime();
+    if (this.save.step > 1) {
+      sfx.chime();
+      this.v3.set(0, GROUND_Y + 0.01, 0);
+      this.fx.burst(this.v3, 0xffe08a, 18, { speed: 0.04, up: 0.06, gravity: 0.05, life: 1.1, size: 0.0008 });
+    }
     this.persist();
   }
 

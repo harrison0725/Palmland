@@ -6,6 +6,7 @@ export class Label {
   private readonly canvas = document.createElement('canvas');
   private readonly tex: CanvasTexture;
   private text = '';
+  private readonly baseW: number;
 
   constructor(widthM = 0.14) {
     this.canvas.width = 1024;
@@ -15,7 +16,17 @@ export class Label {
     const m = new SpriteMaterial({ map: this.tex, transparent: true, depthTest: false });
     this.sprite = new Sprite(m);
     this.sprite.scale.set(widthM, widthM / 4, 1);
+    this.baseW = widthM;
     this.sprite.renderOrder = 10;
+  }
+
+  setOpacity(a: number): void {
+    (this.sprite.material as SpriteMaterial).opacity = a;
+  }
+
+  /** Scale multiplier for a small pop when a message appears. */
+  setPop(k: number): void {
+    this.sprite.scale.set(this.baseW * k, (this.baseW / 4) * k, 1);
   }
 
   set(text: string): void {
