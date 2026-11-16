@@ -64,6 +64,8 @@ const FILM = PARAMS.has('film');
 const NEXT_DAY = PARAMS.has('nextday');
 /** Each new day after the first session, one more villager moves in, up to this many. */
 const MAX_VILLAGERS = 8;
+/** How much bigger the island is when it rests in the room. */
+const TABLE_SCALE = 4.5;
 interface FilmControl {
   pending: number;
   frames: number;
@@ -129,6 +131,7 @@ const FIELD_SPOTS: [number, number, number][] = [
   [0.022, 0.022, -0.5],
   [-0.008, 0.032, 0.1],
 ];
+const SIDES: Side[] = ['left', 'right'];
 const FIREWORK_COLORS = [0xff6f91, 0xffd84a, 0x7ad7ff, 0xb48cff, 0x8cff9e];
 const HOUSE_SPOT = new Vector3(0.024, 0, -0.022);
 const HUT_SPOT = new Vector3(-0.028, 0, -0.02);
@@ -175,6 +178,22 @@ export class PalmSystem extends createSystem({}) {
   private arrivalPending = false;
   private inXR = false;
   private hutGrow = 0;
+  // "Set it down": the island leaves the palm and rests in the room at tabletop size.
+  private placed = false;
+  private everPlaced = false;
+  /** 0 = palm size, 1 = tabletop size. */
+  private placeK = 0;
+  private readonly placedPos = new Vector3();
+  private readonly placedQuat = new Quaternion();
+  private lastHome: Side | null = null;
+  private sinceHome = 99;
+  private flipT = 0;
+  private scoopT = 0;
+  private scoopSide: Side | null = null;
+  private placeMsgT = 0;
+  private godSide: Side = 'right';
+  private faceNear = false;
+  private readonly camLocal = new Vector3();
   private streamK = 0;
   // Villager wishes: the long-term goal after the guided first session.
   private wishType: WishType | null = null;
@@ -389,6 +408,7 @@ export class PalmSystem extends createSystem({}) {
         villagerWorld: (i: number) => this.villagers[i].obj.getWorldPosition(new Vector3()).toArray(),
         islandToWorld: (x: number, y: number, z: number) =>
           this.island.localToWorld(new Vector3(x, y, z)).toArray(),
+        place: () => ({ placed: this.placed, k: this.placeK, scale: this.island.scale.x, night: this.night, home: this.home, face: this.faceNear, pos: this.islandEntityRoot.position.toArray() }),
         wish: () => ({ type: this.wishType, idx: this.wishIdx, wishes: this.save.wishes, night: this.night }),
       };
     }
@@ -432,13 +452,37 @@ export class PalmSystem extends createSystem({}) {
       });
     }
 
-    this.pickHomeHand();
+    if (this.placed) this.home = null;
+    else this.pickHomeHand();
+    if (inXR) this.updatePlacing(dt);
+    else this.placed = false;
     const home = this.home ? this.hands[this.home] : null;
-    const god = this.home ? this.hands[this.home === 'left' ? 'right' : 'left'] : null;
+    let god = this.home ? this.hands[this.home === 'left' ? 'right' : 'left'] : null;
+    if (this.placed) {
+      // With the island resting in the room, whichever hand is nearer plays.
+      // A hand that is carrying a villager keeps the job until it lets go.
+      if (this.heldIdx < 0 || !this.hands[this.godSide].tracked) {
+        const dl = this.hands.left.tracked ? this.hands.left.indexTip.distanceToSquared(this.placedPos) : Infinity;
+        const dr = this.hands.right.tracked ? this.hands.right.indexTip.distanceToSquared(this.placedPos) : Infinity;
+        const next: Side = dl < dr ? 'left' : 'right';
+        if (next !== this.godSide) {
+          this.godSide = next;
+          this.wasPinching = this.hands[next].pinching; // don't grab on the switch frame
+        }
+      }
+      god = this.hands[this.godSide].tracked ? this.hands[this.godSide] : null;
+    }
+    const kTarget = this.placed ? 1 : 0;
+    this.placeK += Math.sign(kTarget - this.placeK) * Math.min(Math.abs(kTarget - this.placeK), dt * 1.1);
+    const moving = this.placeK > 0.001 && this.placeK < 0.999;
 
     // ----- Place the island -----
     let present: boolean;
-    if (inXR) {
+    if (inXR && this.placed) {
+      present = true;
+      this.targetPos.copy(this.placedPos);
+      this.targetQuat.copy(this.placedQuat);
+    } else if (inXR) {
       present = !!home;
       if (home) {
         this.targetPos.copy(home.palmCenter).addScaledVector(home.palmNormal, 0.03);
@@ -469,7 +513,8 @@ export class PalmSystem extends createSystem({}) {
     const rawSpeed = linSpeed + angSpeed * 0.05; // 1 rad/s counts like 5 cm/s
     this.anchorSpeed += (rawSpeed - this.anchorSpeed) * Math.min(1, dt * 20);
     const cutoff = 2.2 + this.anchorSpeed * 60; // Hz
-    const k = 1 - Math.exp(-2 * Math.PI * cutoff * dt);
+    // While the island travels between palm and room, glide instead of snapping.
+    const k = this.placed || moving ? 1 - Math.exp(-dt * 3.5) : 1 - Math.exp(-2 * Math.PI * cutoff * dt);
     const root = this.islandEntityRoot;
     if (this.reveal < 0.01) {
       root.position.copy(this.targetPos);
@@ -480,14 +525,20 @@ export class PalmSystem extends createSystem({}) {
     }
     const targetReveal = present ? 1 : 0;
     this.reveal += (targetReveal - this.reveal) * Math.min(1, dt * (present ? 1.5 : 5));
-    const grow = easeOutBack(this.reveal) * (inXR ? 1 : 3);
+    const pk = this.placeK * this.placeK * (3 - 2 * this.placeK);
+    const grow = easeOutBack(this.reveal) * (inXR ? 1 + (TABLE_SCALE - 1) * pk : 3);
     this.island.scale.setScalar(Math.max(0.0001, grow));
     // Rise out of the palm, then hover with a slow, tiny bob so it feels alive.
     this.island.position.y = (1 - this.reveal) * -0.02 + Math.sin(this.time * 1.1) * 0.0009 * this.reveal;
     if (present && this.save.step === 0 && this.reveal > 0.9) this.advance();
 
     // ----- Day and night from how open the home hand is -----
-    const targetNight = inXR && home ? 1 - home.openness : this.save.step === 4 ? 0 : 0;
+    let targetNight = inXR && home ? 1 - home.openness : 0;
+    if (this.placed) targetNight = this.coveredByHand() ? 1 : 0;
+    // How close is the player's face? Villagers notice.
+    this.world.camera.getWorldPosition(this.camLocal);
+    this.faceNear = inXR && present && this.reveal > 0.9 && this.camLocal.distanceTo(root.position) < 0.3 + 0.3 * this.placeK;
+    this.island.worldToLocal(this.camLocal);
     this.night += (targetNight - this.night) * Math.min(1, dt * 3);
     this.applyLighting();
 
@@ -559,6 +610,79 @@ export class PalmSystem extends createSystem({}) {
   }
 
   // ---------------------------------------------------------------------------
+
+  /** Palm flipped over → set the island down. Open palm held under it → scoop it back up. */
+  private updatePlacing(dt: number): void {
+    if (this.placeMsgT > 0) this.placeMsgT -= dt;
+    if (!this.placed) {
+      if (this.home) {
+        this.lastHome = this.home;
+        this.sinceHome = 0;
+        this.flipT = 0;
+        return;
+      }
+      this.sinceHome += dt;
+      const h = this.lastHome ? this.hands[this.lastHome] : null;
+      const flipped = !!h && h.tracked && h.palmNormal.y < -0.35 && this.sinceHome < 1.0;
+      this.flipT = flipped ? this.flipT + dt : 0;
+      if (this.save.step >= 6 && this.placeK < 0.05 && this.flipT > 0.2 && this.reveal > 0.15) this.setDown();
+      return;
+    }
+    // Scoop: an open palm facing up, held under the island for a moment.
+    let side: Side | null = null;
+    for (const s of SIDES) {
+      const h = this.hands[s];
+      if (!h.tracked || h.palmNormal.y < 0.6 || h.pinching || h.openness < 0.6) continue;
+      const dx = h.palmCenter.x - this.placedPos.x;
+      const dz = h.palmCenter.z - this.placedPos.z;
+      const dy = this.placedPos.y - h.palmCenter.y;
+      if (Math.hypot(dx, dz) < R * TABLE_SCALE * 0.9 && dy > -0.02 && dy < 0.4) side = s;
+    }
+    if (side && side === this.scoopSide) this.scoopT += dt;
+    else this.scoopT = 0;
+    this.scoopSide = side;
+    if (side && this.scoopT > 0.7 && this.placeK > 0.95 && this.heldIdx < 0) {
+      this.placed = false;
+      this.home = side;
+      this.lastHome = side;
+      this.sinceHome = 0;
+      this.scoopT = 0;
+      this.placeMsgT = 0;
+      sfx.pick();
+    }
+  }
+
+  private setDown(): void {
+    const root = this.islandEntityRoot.position;
+    // Rest a little below and beyond where the hand let go, facing the player.
+    this.world.camera.getWorldPosition(this.v1);
+    this.v2.set(root.x - this.v1.x, 0, root.z - this.v1.z);
+    if (this.v2.lengthSq() < 1e-6) this.v2.set(0, 0, -1);
+    this.v2.normalize();
+    this.placedPos.copy(root).addScaledVector(this.v2, 0.14);
+    this.placedPos.y = Math.min(root.y - 0.07, this.v1.y - 0.38);
+    this.placedQuat.setFromAxisAngle(this.v3.set(0, 1, 0), Math.atan2(-this.v2.x, -this.v2.z));
+    this.placed = true;
+    this.flipT = 0;
+    this.home = null;
+    if (this.heldIdx >= 0) this.release();
+    this.placeMsgT = this.everPlaced ? 4 : 11;
+    this.everPlaced = true;
+    sfx.grow();
+  }
+
+  /** A flat, open hand hovering palm-down over the resting island tucks it in for the night. */
+  private coveredByHand(): boolean {
+    for (const s of SIDES) {
+      const h = this.hands[s];
+      if (!h.tracked || h.palmNormal.y > -0.5 || h.openness < 0.7 || h.pinching) continue;
+      const dx = h.palmCenter.x - this.placedPos.x;
+      const dz = h.palmCenter.z - this.placedPos.z;
+      const dy = h.palmCenter.y - this.placedPos.y;
+      if (Math.hypot(dx, dz) < R * TABLE_SCALE * 1.1 && dy > 0.03 && dy < 0.45) return true;
+    }
+    return false;
+  }
 
   private pickHomeHand(): void {
     const keep = this.home && this.hands[this.home];
@@ -900,7 +1024,16 @@ export class PalmSystem extends createSystem({}) {
         v.obj.rotation.z += (0 - v.obj.rotation.z) * ease;
         this.v3.copy(v.target).sub(v.pos).setY(0);
         const d = this.v3.length();
-        if (v.idle > 0) {
+        if (this.faceNear && this.heldIdx < 0) {
+          // A giant face! Stop, turn to look, and wave with little hops.
+          this.v3.set(0, 0, 0);
+          const want = Math.atan2(this.camLocal.x - v.pos.x, this.camLocal.z - v.pos.z);
+          let dd = want - v.obj.rotation.y;
+          dd = Math.atan2(Math.sin(dd), Math.cos(dd));
+          v.obj.rotation.y += dd * (1 - Math.exp(-dt * 6));
+          v.obj.rotation.z = Math.sin(this.time * 9 + i * 1.3) * 0.18;
+          if (v.hop <= 0 && v.pos.y <= 0 && Math.random() < dt * 0.7) v.hop = 1;
+        } else if (v.idle > 0) {
           // Stand and look around for a moment between strolls.
           v.idle -= dt;
           this.v3.set(0, 0, 0);
@@ -1028,8 +1161,13 @@ export class PalmSystem extends createSystem({}) {
     if (!inXR && step > 0) text = '';
     if (step === 6 && !film) {
       // After the guided session the wishes take over the label.
+      const sleepy = this.placed && this.wishType === 'sleep';
       if (this.stepTimer < 6) text = 'Your villagers have wishes now. Watch for a thought bubble';
+      else if (this.placeMsgT > 6) text = 'The island is resting in your room. Lean in and play with both hands';
+      else if (this.placeMsgT > 0) text = 'Cover it with a flat hand for night. Hold an open palm under it to pick it up';
+      else if (!this.everPlaced && this.stepTimer < 12) text = 'Arm getting tired? Turn your palm over to set the island down';
       else if (this.wishMsgT > 0) text = this.wishMsg;
+      else if (sleepy && this.wishAge < 14) text = `A villager is sleepy. Cover the island with a flat hand to bring the night  \u2665 ${this.save.wishes}`;
       else if (this.wishType && this.wishAge < 14) text = `${WISH_TEXT[this.wishType]}  \u2665 ${this.save.wishes}`;
       else text = '';
     }
@@ -1050,11 +1188,11 @@ export class PalmSystem extends createSystem({}) {
       this.labelAlpha = Math.min(1, this.labelAlpha + dt * 4);
     }
     this.label.setOpacity(this.labelAlpha);
-    this.label.setPop(0.85 + 0.15 * easeOutBack(this.labelAlpha));
+    this.label.setPop((0.85 + 0.15 * easeOutBack(this.labelAlpha)) * (1 + 0.9 * this.placeK));
     const s = this.label.sprite;
     const follow = 1 - Math.exp(-dt * 12);
     if (present && this.reveal > 0.3) {
-      this.v1.set(0, 0.075 * (inXR ? 1 : 3), 0);
+      this.v1.set(0, (0.075 + 0.1 * this.placeK) * (inXR ? 1 : 3), 0);
       this.island.localToWorld(this.v1.multiplyScalar(1 / this.island.scale.x));
       s.position.lerp(this.v1, follow);
     } else {
@@ -1123,7 +1261,7 @@ export class PalmSystem extends createSystem({}) {
     if (!this.wishType) {
       this.bubble.sprite.visible = false;
       this.wishWait -= dt;
-      if (this.wishWait <= 0 && this.stepTimer > 6 && this.heldIdx < 0) this.startWish();
+      if (this.wishWait <= 0 && this.stepTimer > 12 && this.heldIdx < 0) this.startWish();
       return;
     }
     this.wishAge += dt;
@@ -1170,6 +1308,7 @@ export class PalmSystem extends createSystem({}) {
     if (forced && WISH_TYPES.includes(forced)) type = forced;
     if (type === 'tree' && this.trees.length >= 40) type = 'play';
     if (type === 'sleep' && this.night > 0.5) type = 'play';
+    if (type === 'water' && this.placed) type = 'friend'; // the island can't be tilted while it rests
     this.wishType = type;
     this.lastWish = type;
     this.wishIdx = candidates[Math.floor(Math.random() * candidates.length)];
