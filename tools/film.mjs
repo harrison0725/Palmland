@@ -2,7 +2,7 @@
 // persists in the page between chunks, so chunks must run in order.
 import fs from 'node:fs';
 
-const OUT = process.env.FILM_OUT || '/tmp/claude-0/-home-user/80034bd3-a635-5e81-83a2-190886d2dd48/scratchpad/frames3';
+const OUT = process.env.FILM_OUT || 'film-frames';
 const FPS = 15;
 
 export default async function run({ page, frame, cdp }) {

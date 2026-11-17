@@ -123,6 +123,8 @@ interface Field {
 }
 
 interface Save {
+  /** A new villager has moved in but the player hasn't watched them arrive yet. */
+  arrival?: boolean;
   step: number;
   trees: [number, number, number][];
   lastVisit: number;
@@ -235,6 +237,7 @@ export class PalmSystem extends createSystem({}) {
   private windmill!: Group;
   private windmillSails!: Object3D;
   private windmillGrow = 0;
+  private coverArmed = true;
   private lanternT = 0;
   private smokeT = 0;
   /** Seconds of village-wide cheering left after a wish is granted. */
@@ -743,11 +746,22 @@ export class PalmSystem extends createSystem({}) {
     if (this.heldIdx >= 0) this.release();
     this.placeMsgT = this.everPlaced ? 4 : 11;
     this.everPlaced = true;
+    this.coverArmed = false;
+    // The resting island can't be tilted, so a wish for water is quietly withdrawn.
+    if (this.wishType === 'water') this.cancelWish();
     sfx.grow();
   }
 
   /** A flat, open hand hovering palm-down over the resting island tucks it in for the night. */
   private coveredByHand(): boolean {
+    const over = this.handOverIsland();
+    // The hand that just set the island down is still hovering over it. Night
+    // only starts once that hand has moved away and one comes back to cover it.
+    if (!over) this.coverArmed = true;
+    return over && this.coverArmed;
+  }
+
+  private handOverIsland(): boolean {
     for (const s of SIDES) {
       const h = this.hands[s];
       if (!h.tracked || h.palmNormal.y > -0.5 || h.openness < 0.7 || h.pinching) continue;
@@ -919,7 +933,6 @@ export class PalmSystem extends createSystem({}) {
     this.island.worldToLocal(tip);
     const pinch = this.v2.copy(god.pinchPoint);
     this.island.worldToLocal(pinch);
-    void scale;
 
     // Pinch: pick up / carry / drop a villager.
     if (god.pinching && !this.wasPinching) {
@@ -959,11 +972,17 @@ export class PalmSystem extends createSystem({}) {
 
     // Poke: plant a tree where the fingertip touches the grass.
     const r = Math.hypot(tip.x, tip.z);
-    const touching = tip.y < 0.01 && tip.y > -0.015 && r < R * 0.92;
+    // The island is several times larger while it rests in the room, so keep the
+    // touch band the same real-world thickness, and ignore a flat open hand:
+    // that hand is covering or scooping, not poking.
+    const band = 1 / Math.max(1, scale * 0.5);
+    if (this.placed && god.openness >= 0.7) return;
+    const touching = tip.y < 0.01 * band && tip.y > -0.015 * band && r < R * 0.92;
     if (!touching || this.plantCooldown > 0) return;
     // Poke a villager and they hop.
     for (let i = 0; i < this.villagers.length; i++) {
       const v = this.villagers[i];
+      if (v.arriving) continue;
       const wantsPlay = this.wishType === 'play' && this.wishIdx === i;
       if (Math.hypot(v.pos.x - tip.x, v.pos.z - tip.z) < (wantsPlay ? 0.008 : 0.005)) {
         if (v.hop <= 0) {
@@ -1079,6 +1098,8 @@ export class PalmSystem extends createSystem({}) {
           v.obj.rotation.z = Math.sin(this.time * 4) * 0.25;
           if (v.pos.y <= 0) {
             v.arriving = false;
+            this.save.arrival = false;
+            this.persist();
             v.obj.rotation.z = 0;
             v.hop = 1;
             v.target.copy(v.pos);
@@ -1160,6 +1181,8 @@ export class PalmSystem extends createSystem({}) {
           v.idle = this.night > 0.6 ? 2 + Math.random() * 3 : 0.4 + Math.random() * 2.2;
           this.v3.set(0, 0, 0);
         } else {
+          // Blocked on the way (the pond rim, the island edge)? Give up and pick again.
+          if (Math.random() < dt * 0.12) this.pickWanderTarget(v, i);
           // Ease out when arriving rather than stopping dead.
           const speed = 0.0058 * Math.min(1, d / 0.004 + 0.25);
           this.v3.multiplyScalar(speed / d);
@@ -1242,9 +1265,14 @@ export class PalmSystem extends createSystem({}) {
       v.target.set(home.x + ((i % 3) - 1) * 0.004, 0, home.z + 0.006 + (i > 2 ? 0.004 : 0));
       return;
     }
-    const a = Math.random() * Math.PI * 2;
-    const d = Math.random() * R * 0.75;
-    v.target.set(Math.cos(a) * d, 0, Math.sin(a) * d);
+    // Pick somewhere a villager can actually stand: not in the pond or a building.
+    for (let tries = 0; tries < 6; tries++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = Math.sqrt(Math.random()) * R * 0.75;
+      v.target.set(Math.cos(a) * d, 0, Math.sin(a) * d);
+      if (this.isOpenGrass(v.target.x, v.target.z)) return;
+    }
+    v.target.copy(v.pos).setY(0);
   }
 
   private updateGrowth(dt: number): void {
@@ -1425,8 +1453,7 @@ export class PalmSystem extends createSystem({}) {
     }
     if (this.wishAge > 60 || v.falling) {
       // Unanswered wishes quietly pass; another villager asks later.
-      this.wishType = null;
-      this.wishWait = 4;
+      this.cancelWish();
       return;
     }
     const b = this.bubble.sprite;
@@ -1472,6 +1499,19 @@ export class PalmSystem extends createSystem({}) {
     }
     this.bubble.set(type);
     sfx.pick();
+  }
+
+  /** Drop the current wish without granting it, undoing anything it changed. */
+  private cancelWish(): void {
+    if (this.wishType === 'water') {
+      const f = this.fields[this.wishField];
+      if (f) {
+        f.wet = 1;
+        f.growth = 1;
+      }
+    }
+    this.wishType = null;
+    this.wishWait = 4;
   }
 
   private grantWish(): void {
@@ -1565,9 +1605,11 @@ export class PalmSystem extends createSystem({}) {
       // Finished the first session? A new villager moves in each day.
       if (this.save.step >= 6 && this.save.villagers < MAX_VILLAGERS && !film) {
         this.save.villagers = Math.max(3, this.save.villagers) + 1;
-        this.arrivalPending = true;
+        this.save.arrival = true;
       }
     }
+    // The welcome waits for the headset: it survives reloads until it has been seen.
+    if (this.save.arrival && !film) this.arrivalPending = true;
     if (PARAMS.has('wishes')) this.save.wishes = Number(PARAMS.get('wishes')) || 0;
     // Returning players skip the reveal step but keep their island.
     if (this.save.step === 0) this.save.trees = [];

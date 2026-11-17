@@ -244,7 +244,8 @@ export class Fireworks {
     }
     this.mesh.instanceMatrix.needsUpdate = true;
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
-    this.alive = any;
+    // A burst can recycle slots this pass has already walked, so keep the pool awake.
+    this.alive = banged ? this.count : any;
     return banged;
   }
 }
