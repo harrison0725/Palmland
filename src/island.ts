@@ -78,6 +78,7 @@ export function buildIslandBase(): Group {
     const root = new Mesh(new ConeGeometry(0.0009, len, 4), M.trunk);
     root.rotation.x = Math.PI;
     root.position.set(Math.cos(a) * R * 0.7, -0.012 - len / 2, Math.sin(a) * R * 0.7);
+    root.userData.under = 'root';
     g.add(root);
   }
   // Floating-island rock underside: a jagged inverted cone.
@@ -96,6 +97,7 @@ export function buildIslandBase(): Group {
   const underMesh = new Mesh(under, M.dirt);
   underMesh.rotation.x = Math.PI;
   underMesh.position.y = -0.025;
+  underMesh.userData.under = 'rock';
   g.add(underMesh);
   // A few rocks on the rim.
   for (let i = 0; i < 6; i++) {

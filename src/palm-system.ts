@@ -21,6 +21,7 @@ import {
   SphereGeometry,
   Vector3,
   VisibilityState,
+  XRPlane,
 } from '@iwsdk/core';
 import { HandState, Side } from './hands.js';
 import {
@@ -148,7 +149,7 @@ const HOUSE_SPOT = new Vector3(0.024, 0, -0.022);
 const HUT_SPOT = new Vector3(-0.028, 0, -0.02);
 const WINDMILL_SPOT = new Vector3(0.037, 0, 0.009);
 
-export class PalmSystem extends createSystem({}) {
+export class PalmSystem extends createSystem({ planes: { required: [XRPlane] } }) {
   private hands!: Record<Side, HandState>;
   private home: Side | null = null;
   private islandEntityRoot!: Object3D;
@@ -228,6 +229,26 @@ export class PalmSystem extends createSystem({}) {
   private raidWas = false;
   private raidMsg = '';
   private raidMsgT = 0;
+  // Landing on a real surface the headset has scanned, and the villager who explores it.
+  private surfaceY = NaN;
+  private surfName = 'table';
+  private readonly surfMin = new Vector3();
+  private readonly surfMax = new Vector3();
+  private groundK = 0;
+  private landedFx = false;
+  private underParts: Object3D[] = [];
+  private roamIdx = -1;
+  private roamPhase = 0;
+  private roamT = 0;
+  private roamLegs = 0;
+  private roamWait = 7;
+  private roamPick = 0;
+  private roamA = 0;
+  private roamY = 0;
+  private readonly roamFrom = new Vector3();
+  private readonly roamTo = new Vector3();
+  private readonly pv = new Vector3();
+  private readonly pq = new Quaternion();
   private readonly raidHits = [new Vector3(), new Vector3(), new Vector3(), new Vector3()];
   private readonly raidV = new Vector3();
   private lastWish: WishType | null = null;
@@ -292,6 +313,9 @@ export class PalmSystem extends createSystem({}) {
     this.content = new Group();
     this.island.add(this.content);
     this.content.add(buildIslandBase());
+    this.content.traverse((o) => {
+      if (o.userData.under) this.underParts.push(o);
+    });
 
     this.pond = buildPond();
     this.content.add(this.pond);
@@ -508,6 +532,20 @@ export class PalmSystem extends createSystem({}) {
         wish: () => ({ type: this.wishType, idx: this.wishIdx, wishes: this.save.wishes }),
         place: () => ({ placed: this.placed, k: this.placeK, pos: this.islandEntityRoot.position.toArray() }),
         setDown: () => this.setDown(),
+        planeList: () =>
+          [...this.queries.planes.entities].map((e) => {
+            const pl = e.getValue(XRPlane, '_plane') as { orientation?: string; semanticLabel?: string; polygon?: DOMPointReadOnly[] };
+            const o = e.object3D!;
+            o.updateWorldMatrix(true, false);
+            const pts = (pl.polygon || []).map((p) => new Vector3(p.x, p.y, p.z).applyMatrix4(o.matrixWorld));
+            const xs = pts.map((p) => +p.x.toFixed(2));
+            const zs = pts.map((p) => +p.z.toFixed(2));
+            return [pl.orientation, pl.semanticLabel, +o.getWorldPosition(new Vector3()).y.toFixed(2), Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)];
+          }),
+        roam: () => {
+          this.roamWait = 0;
+        },
+        roamState: () => ({ idx: this.roamIdx, phase: this.roamPhase, legs: this.roamLegs, surf: this.surfaceY, name: this.surfName, g: +this.groundK.toFixed(2), planes: this.queries.planes.entities.size }),
         raid: () => this.raid.start(),
         raidState: () => ({ active: this.raid.active, score: this.raid.score, swatted: this.raid.swatted, stolen: this.raid.stolen, combo: this.raid.combo }),
         crowTarget: () => (this.raid.target(this.raidV) ? this.island.localToWorld(this.raidV.clone()).toArray() : null),
@@ -670,6 +708,8 @@ export class PalmSystem extends createSystem({}) {
     this.updateSteps(dt);
     this.updateWishes(dt, present);
     this.updateRaid(dt, present);
+    this.updateGround(dt);
+    this.updateRoam(dt);
     this.debugLog(god);
   }
 
@@ -771,6 +811,8 @@ export class PalmSystem extends createSystem({}) {
     this.placedPos.copy(root).addScaledVector(this.v2, 0.14);
     this.placedPos.y = Math.min(root.y - 0.07, this.v1.y - 0.38);
     this.placedQuat.setFromAxisAngle(this.v3.set(0, 1, 0), Math.atan2(-this.v2.x, -this.v2.z));
+    this.landOnSurface(root);
+    this.landedFx = false;
     this.placed = true;
     this.flipT = 0;
     this.home = null;
@@ -1114,10 +1156,12 @@ export class PalmSystem extends createSystem({}) {
     for (let i = 0; i < this.villagers.length; i++) {
       const v = this.villagers[i];
       if (v.held) {
+        if (i === this.roamIdx) this.roamIdx = -1;
         v.obj.scale.set(0.94, 1.12, 0.94); // stretched as it dangles
         v.obj.position.copy(v.pos).setY(v.pos.y + 0.006);
         continue;
       }
+      if (i === this.roamIdx) continue;
       if (v.arriving) {
         // Wait until the player is in XR and the island has grown in, then float
         // down with a sway. The flat-screen preview never shows the newcomer, so
@@ -1282,8 +1326,9 @@ export class PalmSystem extends createSystem({}) {
       const o = v.obj.position;
       const h = Math.max(0, o.y - 0.006);
       const onIsland = Math.hypot(o.x, o.z) < R * 0.97 && o.y > -0.005;
-      v.shadow.visible = v.obj.visible && onIsland && !v.falling;
-      v.shadow.position.set(o.x, GROUND_Y + 0.0001, o.z);
+      const roaming = this.roamIdx >= 0 && this.villagers[this.roamIdx] === v && this.roamPhase >= 2;
+      v.shadow.visible = v.obj.visible && (onIsland || roaming) && !v.falling;
+      v.shadow.position.set(o.x, (onIsland ? GROUND_Y : 0.006 + this.roamY) + 0.0001, o.z);
       v.shadow.scale.setScalar(0.0017 / (1 + h * 35));
     }
   }
@@ -1340,7 +1385,7 @@ export class PalmSystem extends createSystem({}) {
       // After the guided session the wishes take over the label.
       const sleepy = this.placed && this.wishType === 'sleep';
       if (this.stepTimer < 6) text = 'Your villagers have wishes now. Watch for a thought bubble';
-      else if (this.placeMsgT > 6) text = 'The island is resting in your room. Lean in and play with both hands';
+      else if (this.placeMsgT > 6) text = Number.isFinite(this.surfaceY) ? `It landed on your real ${this.surfName}! Lean in and play with both hands` : 'The island is resting in your room. Lean in and play with both hands';
       else if (this.placeMsgT > 0) text = 'Cover it with a flat hand for night. Hold an open palm under it to pick it up';
       else if (!this.everPlaced && this.stepTimer < 12) text = 'Arm getting tired? Turn your palm over to set the island down';
       else if (this.wishMsgT > 0) text = this.wishMsg;
@@ -1474,7 +1519,7 @@ export class PalmSystem extends createSystem({}) {
     if (!this.wishType) {
       this.bubble.sprite.visible = false;
       this.wishWait -= dt;
-      if (this.wishWait <= 0 && this.stepTimer > 12 && this.heldIdx < 0 && !this.raid.active) this.startWish();
+      if (this.wishWait <= 0 && this.stepTimer > 12 && this.heldIdx < 0 && !this.raid.active && this.roamIdx < 0) this.startWish();
       return;
     }
     this.wishAge += dt;
@@ -1622,6 +1667,259 @@ export class PalmSystem extends createSystem({}) {
       });
       this.occludersApplied.add(model);
     }
+  }
+
+  /** Rest the island on the real table (or other surface) under the hand, if the headset has scanned one. */
+  private landOnSurface(root: Vector3): void {
+    this.surfaceY = NaN;
+    let best = -Infinity;
+    for (const e of this.queries.planes.entities) {
+      const obj = e.object3D;
+      const plane = e.getValue(XRPlane, '_plane') as
+        | { orientation?: string; polygon?: DOMPointReadOnly[]; semanticLabel?: string }
+        | undefined;
+      if (!obj || !plane || !plane.polygon || plane.orientation !== 'horizontal') continue;
+      obj.updateWorldMatrix(true, false);
+      obj.getWorldQuaternion(this.pq);
+      if (this.pv.set(0, 1, 0).applyQuaternion(this.pq).y < 0.9) continue;
+      obj.getWorldPosition(this.pv);
+      const y = this.pv.y;
+      if (y > root.y - 0.04 || y < root.y - 0.75 || y <= best) continue;
+      let x0 = Infinity;
+      let x1 = -Infinity;
+      let z0 = Infinity;
+      let z1 = -Infinity;
+      for (const p of plane.polygon) {
+        this.pv.set(p.x, p.y, p.z).applyMatrix4(obj.matrixWorld);
+        x0 = Math.min(x0, this.pv.x);
+        x1 = Math.max(x1, this.pv.x);
+        z0 = Math.min(z0, this.pv.z);
+        z1 = Math.max(z1, this.pv.z);
+      }
+      const m = 0.15;
+      if (root.x < x0 - m || root.x > x1 + m || root.z < z0 - m || root.z > z1 + m) continue;
+      best = y;
+      this.surfMin.set(x0, y, z0);
+      this.surfMax.set(x1, y, z1);
+      const label = (plane.semanticLabel || '').toLowerCase();
+      this.surfName = label && label !== 'other' && !label.includes('floor') ? label.replace(/_/g, ' ') : label.includes('floor') ? 'floor' : 'table';
+    }
+    if (!Number.isFinite(best)) return;
+    this.surfaceY = best;
+    // Slide it fully onto the surface where it fits.
+    const half = R * TABLE_SCALE * 0.8;
+    const fit = (v: number, a: number, b: number) => (b - a > 2 * half ? Math.min(b - half, Math.max(a + half, v)) : (a + b) / 2);
+    this.placedPos.x = fit(this.placedPos.x, this.surfMin.x, this.surfMax.x);
+    this.placedPos.z = fit(this.placedPos.z, this.surfMin.z, this.surfMax.z);
+    this.placedPos.y = best + 0.0068 * TABLE_SCALE;
+  }
+
+  /** On a real surface the floating rock settles flat and the roots tuck away. */
+  private updateGround(dt: number): void {
+    if (!this.placed) this.surfaceY = NaN;
+    const want = this.placed && Number.isFinite(this.surfaceY) ? 1 : 0;
+    const before = this.groundK;
+    this.groundK += (want - this.groundK) * (1 - Math.exp(-dt * 3));
+    if (Math.abs(this.groundK - want) < 0.002) this.groundK = want;
+    if (this.groundK !== before) {
+      const g = this.groundK;
+      for (const o of this.underParts) {
+        if (o.userData.under === 'rock') {
+          const sy = 1 - 0.88 * g;
+          o.scale.y = sy;
+          o.position.y = -0.0005 - 0.025 * sy;
+        } else o.scale.setScalar(Math.max(0.001, 1 - g));
+      }
+    }
+    if (want && !this.landedFx && this.placeK > 0.98) {
+      // Touchdown: a puff of dust all around the rim.
+      this.landedFx = true;
+      for (let k = 0; k < 6; k++) {
+        const a = (k / 6) * Math.PI * 2;
+        this.v3.set(Math.cos(a) * R, -0.004, Math.sin(a) * R);
+        this.fx.burst(this.v3, 0xcbb89a, 6, { speed: 0.02, up: 0.012 });
+      }
+      sfx.pop();
+    }
+  }
+
+  private roamOk(): boolean {
+    return this.groundK > 0.95 && this.placeK > 0.99 && this.night < 0.3 && !this.festival && !this.raid.active;
+  }
+
+  /** Island-local point → is it on the scanned surface, clear of its edges? */
+  private onSurface(x: number, z: number, parent: Object3D): boolean {
+    parent.localToWorld(this.pv.set(x, 0, z));
+    const m = 0.035;
+    return this.pv.x > this.surfMin.x + m && this.pv.x < this.surfMax.x - m && this.pv.z > this.surfMin.z + m && this.pv.z < this.surfMax.z - m;
+  }
+
+  /** Now and then a brave villager hops off the island and explores the real table around it. */
+  private updateRoam(dt: number): void {
+    if (this.roamIdx < 0) {
+      if (!this.roamOk() || this.heldIdx >= 0) return;
+      this.roamWait -= dt;
+      if (this.roamWait > 0) return;
+      this.roamWait = 6;
+      const n = this.villagers.length;
+      let pick = -1;
+      for (let k = 0; k < n; k++) {
+        const i = (this.roamPick + k) % n;
+        const v = this.villagers[i];
+        if (i !== this.wishIdx && !v.held && !v.falling && !v.arriving && v.pos.y <= 0) {
+          pick = i;
+          break;
+        }
+      }
+      if (pick < 0) return;
+      const v = this.villagers[pick];
+      const parent = v.obj.parent;
+      if (!parent) return;
+      // Head for the side of the island with the most table beyond it.
+      const a0 = Math.atan2(v.pos.z, v.pos.x);
+      let found = false;
+      for (let k = 0; k < 12 && !found; k++) {
+        const a = a0 + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 0.52;
+        if (this.onSurface(Math.cos(a) * R * 2, Math.sin(a) * R * 2, parent)) {
+          this.roamA = a;
+          found = true;
+        }
+      }
+      if (!found) {
+        this.roamWait = 20;
+        return;
+      }
+      this.roamPick = pick + 1;
+      this.roamIdx = pick;
+      this.roamPhase = 1;
+      this.roamLegs = 0;
+      this.roamTo.set(Math.cos(this.roamA) * R * 0.84, 0, Math.sin(this.roamA) * R * 0.84);
+      this.raidMsg = `A villager is off to explore your real ${this.surfName}!`;
+      this.raidMsgT = 5;
+      return;
+    }
+    const v = this.villagers[this.roamIdx];
+    const parent = v.obj.parent;
+    if (!this.placed || this.groundK < 0.5 || !parent) {
+      // The island was scooped up: the explorer is whisked back aboard.
+      this.roamIdx = -1;
+      v.pos.set(0, 0.03, 0.01);
+      v.vel.set(0, 0, 0);
+      v.vy = 0;
+      return;
+    }
+    // Real surface height in the villagers' frame (feet sit 0.006 above their origin).
+    parent.worldToLocal(this.pv.set(this.placedPos.x, this.surfaceY, this.placedPos.z));
+    this.roamY = this.pv.y - 0.006;
+    const ok = this.roamOk();
+    if (this.roamPhase >= 2 && this.roamPhase <= 4) {
+      this.raidMsg = `A villager is exploring your real ${this.surfName}!`;
+      this.raidMsgT = Math.max(this.raidMsgT, 0.3);
+    }
+    if (this.roamPhase === 1) {
+      if (this.roamWalk(v, this.roamTo, 0, dt)) this.roamHop(v, R * 1.16, this.roamY, 2);
+    } else if (this.roamPhase === 2 || this.roamPhase === 5) {
+      this.roamT += dt / 0.65;
+      const t = Math.min(1, this.roamT);
+      v.pos.lerpVectors(this.roamFrom, this.roamTo, t);
+      const y = this.roamFrom.y + (this.roamTo.y - this.roamFrom.y) * t + 4 * t * (1 - t) * 0.008;
+      v.obj.position.set(v.pos.x, 0.006 + y, v.pos.z);
+      const sy = t < 0.15 ? 0.75 : t > 0.92 ? 0.8 : 1.2;
+      v.obj.scale.set(1 / Math.sqrt(sy), sy, 1 / Math.sqrt(sy));
+      v.obj.rotation.y = Math.atan2(this.roamTo.x - this.roamFrom.x, this.roamTo.z - this.roamFrom.z);
+      if (t >= 1) {
+        v.pos.y = this.roamTo.y;
+        this.v3.set(v.pos.x, 0.006 + v.pos.y, v.pos.z);
+        this.fx.burst(this.v3, 0xcbb89a, 5, { speed: 0.012, up: 0.01 });
+        sfx.pop();
+        if (this.roamPhase === 2) {
+          this.roamPhase = 3;
+          this.roamT = 0;
+          this.pickRoamTarget(v, parent);
+        } else {
+          this.roamIdx = -1;
+          this.roamPhase = 0;
+          v.pos.y = 0;
+          v.target.copy(v.pos);
+          v.idle = 1;
+          v.hop = 1;
+          v.vel.set(0, 0, 0);
+          this.roamWait = 35 + Math.random() * 25;
+          this.raidMsg = 'Back home, with tales of the giant world';
+          this.raidMsgT = 4;
+          sfx.chime();
+        }
+      }
+    } else if (this.roamPhase === 3) {
+      if (this.roamT > 0) {
+        // Stop and marvel: look around, with a happy hop.
+        this.roamT -= dt;
+        v.obj.rotation.y += dt * 2.2;
+        const k = Math.max(0, this.roamT);
+        v.obj.position.set(v.pos.x, 0.006 + this.roamY + Math.abs(Math.sin(k * 9)) * 0.003, v.pos.z);
+        v.obj.scale.set(1, 1, 1);
+        if (this.roamT <= 0) {
+          if (this.roamLegs >= 2 || !ok) {
+            const a = Math.atan2(v.pos.z, v.pos.x);
+            this.roamTo.set(Math.cos(a) * R * 1.16, this.roamY, Math.sin(a) * R * 1.16);
+            this.roamPhase = 4;
+          } else this.pickRoamTarget(v, parent);
+        }
+      } else if (this.roamWalk(v, this.roamTo, this.roamY, dt) || !ok) {
+        this.roamLegs++;
+        this.roamT = ok ? 0.9 : 0.01;
+        if (this.roamLegs === 1) sfx.chime();
+      }
+    } else if (this.roamPhase === 4) {
+      if (this.roamWalk(v, this.roamTo, this.roamY, dt)) this.roamHop(v, R * 0.8, 0, 5);
+    }
+  }
+
+  private roamHop(v: Villager, r: number, y: number, phase: number): void {
+    const a = Math.atan2(v.pos.z, v.pos.x);
+    this.roamFrom.copy(v.pos);
+    this.roamTo.set(Math.cos(a) * r, y, Math.sin(a) * r);
+    this.roamT = 0;
+    this.roamPhase = phase;
+    v.vel.set(0, 0, 0);
+  }
+
+  private pickRoamTarget(v: Villager, parent: Object3D): void {
+    for (let k = 0; k < 10; k++) {
+      const a = this.roamA + (Math.random() - 0.5) * 2.2;
+      const d = R * (1.35 + Math.random() * 0.8);
+      const x = Math.cos(a) * d;
+      const z = Math.sin(a) * d;
+      if (this.onSurface(x, z, parent)) {
+        this.roamTo.set(x, this.roamY, z);
+        return;
+      }
+    }
+    this.roamTo.set(Math.cos(this.roamA) * R * 1.3, this.roamY, Math.sin(this.roamA) * R * 1.3);
+  }
+
+  /** Walk toward a point at a fixed height with the usual bouncy step. Returns true on arrival. */
+  private roamWalk(v: Villager, to: Vector3, y: number, dt: number): boolean {
+    this.pv.copy(to).sub(v.pos).setY(0);
+    const d = this.pv.length();
+    if (d < 0.0012) {
+      v.vel.set(0, 0, 0);
+      return true;
+    }
+    this.pv.multiplyScalar(0.012 / d);
+    v.vel.lerp(this.pv, 1 - Math.exp(-dt * 6));
+    v.pos.addScaledVector(v.vel, dt);
+    v.pos.y = y;
+    const sp = Math.hypot(v.vel.x, v.vel.z);
+    v.walk += sp * dt * 1900;
+    const step = Math.abs(Math.sin(v.walk));
+    const sy = 1 + (step - 0.5) * 0.08;
+    v.obj.scale.set(1 / Math.sqrt(sy), sy, 1 / Math.sqrt(sy));
+    v.obj.position.set(v.pos.x, 0.006 + y + step * 0.0007, v.pos.z);
+    let dd = Math.atan2(v.vel.x, v.vel.z) - v.obj.rotation.y;
+    dd = Math.atan2(Math.sin(dd), Math.cos(dd));
+    v.obj.rotation.y += dd * (1 - Math.exp(-dt * 8));
+    return false;
   }
 
   private updateRaid(dt: number, present: boolean): void {
