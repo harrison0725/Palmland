@@ -41,6 +41,7 @@ import { Label } from './label.js';
 import { HandSkeleton } from './hand-skeleton.js';
 import { sfx } from './sfx.js';
 import { Stream } from './water.js';
+import { CrowRaid } from './raid.js';
 import { Critters, Fireworks, LeapingFish, NightSky, Rainbow, SkyLanterns, buildNightDome } from './life.js';
 import {
   buildFlowers,
@@ -132,6 +133,8 @@ interface Save {
   villagers: number;
   /** Wishes granted so far: the village's happiness. */
   wishes: number;
+  /** Best crow raid score. */
+  raidBest?: number;
 }
 
 const FIELD_SPOTS: [number, number, number][] = [
@@ -220,6 +223,13 @@ export class PalmSystem extends createSystem({}) {
   private wishHold = 0;
   private wishMsg = '';
   private wishMsgT = 0;
+  private raid!: CrowRaid;
+  private raidWait = PARAMS.has('raid') ? 4 : 40;
+  private raidWas = false;
+  private raidMsg = '';
+  private raidMsgT = 0;
+  private readonly raidHits = [new Vector3(), new Vector3(), new Vector3(), new Vector3()];
+  private readonly raidV = new Vector3();
   private lastWish: WishType | null = null;
   private bubble!: WishBubble;
   private flowers!: InstancedMesh;
@@ -317,6 +327,23 @@ export class PalmSystem extends createSystem({}) {
         growth: 0,
       });
     }
+    this.raid = new CrowRaid({
+      fieldCount: this.fields.length,
+      fieldCenter: (i) => this.fields[i].center,
+      steal: (i) => {
+        const f = this.fields[i];
+        f.growth = Math.max(0.15, f.growth - 0.3);
+        this.raidV.set(f.center.x, GROUND_Y + 0.004, f.center.z);
+        this.fx.burst(this.raidV, 0xe8c45a, 8, { speed: 0.015, up: 0.03, size: 0.0007 });
+      },
+      feathers: (at) => {
+        this.fx.burst(at, 0x2a2a36, 10, { speed: 0.03, up: 0.03, size: 0.0008, life: 0.8, gravity: 0.05 });
+        this.fx.burst(at, 0xffe066, 5, { speed: 0.04, up: 0.04, size: 0.0006, life: 0.4 });
+      },
+      caw: () => sfx.caw(),
+      swat: (combo) => sfx.swat(combo),
+    });
+    this.content.add(this.raid.group);
     if (this.save.step >= 4) for (const f of this.fields) {
       f.wet = 1;
       f.growth = 1;
@@ -481,6 +508,9 @@ export class PalmSystem extends createSystem({}) {
         wish: () => ({ type: this.wishType, idx: this.wishIdx, wishes: this.save.wishes }),
         place: () => ({ placed: this.placed, k: this.placeK, pos: this.islandEntityRoot.position.toArray() }),
         setDown: () => this.setDown(),
+        raid: () => this.raid.start(),
+        raidState: () => ({ active: this.raid.active, score: this.raid.score, swatted: this.raid.swatted, stolen: this.raid.stolen, combo: this.raid.combo }),
+        crowTarget: () => (this.raid.target(this.raidV) ? this.island.localToWorld(this.raidV.clone()).toArray() : null),
         setWishes: (n: number) => {
           this.save.wishes = n;
         },
@@ -639,6 +669,7 @@ export class PalmSystem extends createSystem({}) {
     this.updateLabel(inXR, present, dt);
     this.updateSteps(dt);
     this.updateWishes(dt, present);
+    this.updateRaid(dt, present);
     this.debugLog(god);
   }
 
@@ -1316,6 +1347,10 @@ export class PalmSystem extends createSystem({}) {
       else if (sleepy && this.wishAge < 14) text = `A villager is sleepy. Cover the island with a flat hand to bring the night  \u2665 ${this.save.wishes}`;
       else if (this.wishType && this.wishAge < 14) text = `${WISH_TEXT[this.wishType]}  \u2665 ${this.save.wishes}`;
       else text = '';
+      if (this.raid.active) {
+        const c = this.raid.combo > 1 ? `  x${this.raid.combo} combo!` : '';
+        text = this.raid.score > 0 ? `Crows! Swat them away  \u2605 ${this.raid.score}${c}` : 'Crows are coming for your crops! Swat them away with your hand';
+      } else if (this.raidMsgT > 0) text = this.raidMsg;
     }
     if (this.arrivalLabel > 0) {
       this.arrivalLabel -= dt;
@@ -1439,7 +1474,7 @@ export class PalmSystem extends createSystem({}) {
     if (!this.wishType) {
       this.bubble.sprite.visible = false;
       this.wishWait -= dt;
-      if (this.wishWait <= 0 && this.stepTimer > 12 && this.heldIdx < 0) this.startWish();
+      if (this.wishWait <= 0 && this.stepTimer > 12 && this.heldIdx < 0 && !this.raid.active) this.startWish();
       return;
     }
     this.wishAge += dt;
@@ -1587,6 +1622,42 @@ export class PalmSystem extends createSystem({}) {
       });
       this.occludersApplied.add(model);
     }
+  }
+
+  private updateRaid(dt: number, present: boolean): void {
+    const r = this.raid;
+    this.raidMsgT -= dt;
+    const ready = this.save.step === 6 && present && this.reveal > 0.9 && this.stepTimer > 14 && !this.festival && this.heldIdx < 0;
+    if (!r.active && ready && !film) {
+      this.raidWait -= dt;
+      if (this.raidWait <= 0 && !this.wishType) r.start();
+    }
+    // Hands that can swat: any tracked hand that is not holding the island.
+    let n = 0;
+    for (const side of ['left', 'right'] as const) {
+      const h = this.hands[side];
+      if (!h.tracked || side === this.home) continue;
+      this.island.worldToLocal(this.raidHits[n++].copy(h.indexTip));
+      this.island.worldToLocal(this.raidHits[n++].copy(h.palmCenter));
+    }
+    // About 2 cm of real space, whatever size the island is.
+    r.update(dt, this.raidHits, n, Math.max(0.006, 0.02 / Math.max(0.001, this.island.scale.x)));
+    if (this.raidWas && !r.active) {
+      const best = Math.max(this.save.raidBest ?? 0, r.score);
+      const record = r.score > (this.save.raidBest ?? 0) && r.score > 0;
+      this.save.raidBest = best;
+      const perfect = r.stolen === 0;
+      if (perfect) {
+        this.save.wishes++;
+        this.cheerT = 2.5;
+      }
+      this.raidMsg = `${perfect ? 'Perfect defence! +1 \u2665' : `Raid over. ${r.stolen} crops stolen`}  \u2605 ${r.score}${record ? '  New best!' : `  Best ${best}`}`;
+      this.raidMsgT = 5;
+      this.raidWait = 55 + Math.random() * 35;
+      sfx.chime();
+      this.persist();
+    }
+    this.raidWas = r.active;
   }
 
   private load(): void {
