@@ -4,13 +4,16 @@ import {
   Color,
   DoubleSide,
   DynamicDrawUsage,
+  Group,
   IcosahedronGeometry,
   InstancedMesh,
   Matrix4,
   Mesh,
   MeshBasicMaterial,
+  Object3D,
   PlaneGeometry,
   Quaternion,
+  RingGeometry,
   SphereGeometry,
   Vector3,
 } from '@iwsdk/core';
@@ -326,4 +329,160 @@ export function buildNightDome(radius: number): Mesh {
   dome.renderOrder = -5;
   dome.visible = false;
   return dome;
+}
+
+const RAINBOW = [0xff4d4d, 0xff9f3a, 0xffe14a, 0x5fd66a, 0x4aa8ff, 0x8a63ff];
+
+/** A rainbow that arcs over the island after the fields are watered. */
+export class Rainbow {
+  readonly group = new Group();
+  private readonly mats: MeshBasicMaterial[] = [];
+  private k = 0;
+
+  constructor(radius: number) {
+    const band = radius * 0.045;
+    for (let i = 0; i < RAINBOW.length; i++) {
+      const mat = new MeshBasicMaterial({
+        color: RAINBOW[i],
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        side: DoubleSide,
+        toneMapped: false,
+      });
+      // Flat ring segments read as bands of light rather than as plastic tubes.
+      const geo = new RingGeometry(radius - (i + 1) * band, radius - i * band, 48, 1, 0, Math.PI);
+      const m = new Mesh(geo, mat);
+      m.renderOrder = 4;
+      this.group.add(m);
+      this.mats.push(mat);
+    }
+    this.group.visible = false;
+  }
+
+  /** `want` is whether the rainbow should be showing; it fades and sweeps in. */
+  update(dt: number, want: boolean, yaw: number): void {
+    this.k += ((want ? 1 : 0) - this.k) * (1 - Math.exp(-dt * (want ? 1.6 : 1.1)));
+    this.group.visible = this.k > 0.01;
+    if (!this.group.visible) return;
+    this.group.rotation.y = yaw;
+    // Rise out of the ground as it appears.
+    const s = 0.6 + 0.4 * this.k;
+    this.group.scale.set(s, s, s);
+    for (let i = 0; i < this.mats.length; i++) this.mats[i].opacity = 0.62 * this.k;
+  }
+}
+
+/** Moon and shooting stars that live in the pocket of night behind the island. */
+export class NightSky {
+  readonly group = new Group();
+  private readonly moon: Mesh;
+  private readonly moonMat: MeshBasicMaterial;
+  private readonly streak: Mesh;
+  private readonly streakMat: MeshBasicMaterial;
+  private readonly from = new Vector3();
+  private readonly dir = new Vector3();
+  private t = -1;
+  private wait = 1.2;
+
+  constructor() {
+    this.moonMat = new MeshBasicMaterial({ color: 0xfff6cf, transparent: true, opacity: 0, toneMapped: false });
+    this.moon = new Mesh(new SphereGeometry(0.011, 16, 12), this.moonMat);
+    this.moon.position.set(-0.075, 0.125, -0.1);
+    this.group.add(this.moon);
+    this.streakMat = new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, toneMapped: false, depthWrite: false });
+    const geo = new BoxGeometry(1, 0.0006, 0.0006);
+    geo.translate(-0.5, 0, 0); // origin at the bright head, tail trailing behind
+    this.streak = new Mesh(geo, this.streakMat);
+    this.streak.visible = false;
+    this.group.add(this.streak);
+    this.group.visible = false;
+  }
+
+  update(dt: number, dusk: number): void {
+    this.group.visible = dusk > 0.02;
+    if (!this.group.visible) return;
+    this.moonMat.opacity = dusk;
+    this.moon.scale.setScalar(0.6 + 0.4 * dusk);
+    if (this.t < 0) {
+      this.wait -= dt;
+      if (this.wait <= 0 && dusk > 0.7) {
+        this.t = 0;
+        this.wait = 1.6 + Math.random() * 2.2;
+        const side = Math.random() < 0.5 ? -1 : 1;
+        this.from.set(-0.11 * side + (Math.random() - 0.5) * 0.05, 0.13 + Math.random() * 0.04, -0.1 - Math.random() * 0.04);
+        this.dir.set(side * (0.75 + Math.random() * 0.2), -0.45 - Math.random() * 0.2, 0.1).normalize();
+        this.streak.rotation.set(0, 0, Math.atan2(this.dir.y, this.dir.x));
+        this.streak.rotation.y = 0;
+      }
+    } else {
+      this.t += dt / 0.7;
+      if (this.t >= 1) {
+        this.t = -1;
+        this.streak.visible = false;
+        return;
+      }
+      this.streak.visible = true;
+      this.streak.position.copy(this.from).addScaledVector(this.dir, this.t * 0.17);
+      const tail = 0.035 * Math.sin(this.t * Math.PI);
+      this.streak.scale.set(Math.max(0.0001, tail), 1, 1);
+      this.streakMat.opacity = Math.sin(this.t * Math.PI) * dusk;
+    }
+  }
+}
+
+/** Drives one fish model through an occasional leap out of the pond. */
+export class LeapingFish {
+  private t = -1;
+  private wait = 3;
+  private ax = 0;
+  private az = 0;
+  private bx = 0;
+  private bz = 0;
+
+  constructor(private readonly fish: Object3D) {
+    fish.visible = false;
+  }
+
+  /**
+   * @param calm whether the pond is level and full enough for a fish to jump
+   * @returns 1 on the frame it leaves the water, 2 when it lands, else 0. `at` gets the spot.
+   */
+  update(dt: number, calm: boolean, pondX: number, pondZ: number, pondR: number, y: number, at: Vector3): number {
+    if (this.t < 0) {
+      this.fish.visible = false;
+      if (!calm) return 0;
+      this.wait -= dt;
+      if (this.wait > 0) return 0;
+      this.wait = 3.5 + Math.random() * 4;
+      this.t = 0;
+      const a = Math.random() * Math.PI * 2;
+      const r = pondR * 0.5;
+      this.ax = pondX + Math.cos(a) * r;
+      this.az = pondZ + Math.sin(a) * r;
+      this.bx = pondX - Math.cos(a) * r * 0.8;
+      this.bz = pondZ - Math.sin(a) * r * 0.8;
+      at.set(this.ax, y, this.az);
+      return 1;
+    }
+    const before = this.t;
+    this.t += dt / 0.75;
+    const u = Math.min(1, this.t);
+    const x = this.ax + (this.bx - this.ax) * u;
+    const z = this.az + (this.bz - this.az) * u;
+    const h = 4 * u * (1 - u) * 0.0075;
+    this.fish.visible = true;
+    this.fish.position.set(x, y + h - 0.0006, z);
+    // Nose follows the arc: up on the way out, down on the way in.
+    const heading = Math.atan2(this.bx - this.ax, this.bz - this.az);
+    const pitch = Math.atan2(4 * (1 - 2 * u) * 0.0075, Math.hypot(this.bx - this.ax, this.bz - this.az));
+    this.fish.rotation.set(-pitch, heading, Math.sin(this.t * 30) * 0.25, 'YXZ');
+    if (this.t >= 1 && before < 1) {
+      this.t = -1;
+      this.fish.visible = false;
+      at.set(this.bx, y, this.bz);
+      return 2;
+    }
+    return 0;
+  }
 }

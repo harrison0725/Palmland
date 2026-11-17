@@ -32,13 +32,16 @@ import {
   buildPond,
   buildTree,
   buildVillager,
+  buildWindmill,
+  buildFish,
   buildCloud,
   rng,
 } from './island.js';
 import { Label } from './label.js';
 import { HandSkeleton } from './hand-skeleton.js';
 import { sfx } from './sfx.js';
-import { Critters, Fireworks, SkyLanterns, buildNightDome } from './life.js';
+import { Stream } from './water.js';
+import { Critters, Fireworks, LeapingFish, NightSky, Rainbow, SkyLanterns, buildNightDome } from './life.js';
 import {
   buildFlowers,
   buildLanternRing,
@@ -138,6 +141,7 @@ const SIDES: Side[] = ['left', 'right'];
 const FIREWORK_COLORS = [0xff2d6f, 0xffc400, 0x2fb8ff, 0xa24dff, 0x2fff7a, 0xff7a1a];
 const HOUSE_SPOT = new Vector3(0.024, 0, -0.022);
 const HUT_SPOT = new Vector3(-0.028, 0, -0.02);
+const WINDMILL_SPOT = new Vector3(0.037, 0, 0.009);
 
 export class PalmSystem extends createSystem({}) {
   private hands!: Record<Side, HandState>;
@@ -146,7 +150,13 @@ export class PalmSystem extends createSystem({}) {
   private island!: Group; // scaled pivot holding all content (local units = metres at scale 1)
   private content!: Group;
   private pond!: Mesh;
-  private stream!: Mesh;
+  private stream!: Stream;
+  private pouring = false;
+  private streamReach = 0;
+  private readonly streamStart = new Vector3();
+  private readonly streamEnd = new Vector3();
+  private readonly slosh = new Vector3();
+  private readonly pondHome = new Vector3();
   private drops!: InstancedMesh;
   private dropPos: Vector3[] = [];
   private dropVel: Vector3[] = [];
@@ -198,6 +208,7 @@ export class PalmSystem extends createSystem({}) {
   private faceNear = false;
   private readonly camLocal = new Vector3();
   private streamK = 0;
+  private rainbowT = 0;
   // Villager wishes: the long-term goal after the guided first session.
   private wishType: WishType | null = null;
   private wishIdx = -1;
@@ -218,6 +229,12 @@ export class PalmSystem extends createSystem({}) {
   private fireworks!: Fireworks;
   private skyLanterns!: SkyLanterns;
   private nightDome!: Mesh;
+  private nightSky!: NightSky;
+  private rainbow!: Rainbow;
+  private fish!: LeapingFish;
+  private windmill!: Group;
+  private windmillSails!: Object3D;
+  private windmillGrow = 0;
   private lanternT = 0;
   private smokeT = 0;
   /** Seconds of village-wide cheering left after a wish is granted. */
@@ -337,9 +354,10 @@ export class PalmSystem extends createSystem({}) {
     }
 
     // Water stream: a thin ribbon from the pond to the downhill rim.
-    this.stream = new Mesh(new BoxGeometry(1, 0.0012, 0.004), M.water);
-    this.stream.visible = false;
-    this.content.add(this.stream);
+    this.stream = new Stream(M.water);
+    this.content.add(this.stream.mesh);
+    this.content.add(this.stream.foam);
+    this.pondHome.copy(this.pond.position);
 
     this.bubble = new WishBubble();
     this.bubble.sprite.scale.setScalar(0.011);
@@ -359,6 +377,21 @@ export class PalmSystem extends createSystem({}) {
     this.nightDome = buildNightDome(0.24);
     this.nightDome.position.y = 0.05;
     this.content.add(this.nightDome);
+    this.nightSky = new NightSky();
+    this.content.add(this.nightSky.group);
+    this.rainbow = new Rainbow(R * 0.82);
+    this.rainbow.group.position.set(0, GROUND_Y - 0.002, -R * 0.3);
+    this.content.add(this.rainbow.group);
+    const fish = buildFish();
+    this.content.add(fish);
+    this.fish = new LeapingFish(fish);
+    this.windmill = buildWindmill();
+    this.windmill.position.set(WINDMILL_SPOT.x, GROUND_Y - 0.0002, WINDMILL_SPOT.z);
+    this.windmill.rotation.y = -0.45;
+    this.windmillSails = this.windmill.getObjectByName('Sails')!;
+    this.windmillGrow = this.save.wishes >= UNLOCK_FLOWERS ? 1 : 0;
+    this.windmill.visible = this.windmillGrow > 0;
+    this.content.add(this.windmill);
     this.content.add(this.skyLanterns.mesh);
 
     this.fx = new Particles();
@@ -370,7 +403,7 @@ export class PalmSystem extends createSystem({}) {
     // Droplets fall in world space, so they live on the scene root.
     const dropCount = 120;
     this.drops = new InstancedMesh(
-      new SphereGeometry(0.0012, 5, 4),
+      new SphereGeometry(0.0012, 10, 8),
       new MeshBasicMaterial({ color: 0x8fd3ff, transparent: true, opacity: 0.9 }),
       dropCount,
     );
@@ -441,7 +474,7 @@ export class PalmSystem extends createSystem({}) {
           this.island.localToWorld(new Vector3(x, y, z)).toArray(),
         villagerWorld: (i: number) =>
           this.villagers[i].obj.getWorldPosition(new Vector3()).toArray(),
-        state: () => ({ step: this.save.step, trees: this.trees.length, held: this.heldIdx, night: this.night, wishes: this.save.wishes, placed: this.placed }),
+        state: () => ({ step: this.save.step, trees: this.trees.length, held: this.heldIdx, night: this.night, wishes: this.save.wishes, placed: this.placed, water: [this.streamK, this.streamReach, this.rainbowT, this.pondLevel, ...this.fields.map((f) => f.wet)].map((x) => +x.toFixed(2)) }),
         wish: () => ({ type: this.wishType, idx: this.wishIdx, wishes: this.save.wishes }),
         place: () => ({ placed: this.placed, k: this.placeK, pos: this.islandEntityRoot.position.toArray() }),
         setDown: () => this.setDown(),
@@ -768,51 +801,74 @@ export class PalmSystem extends createSystem({}) {
   }
 
   private updateWater(dt: number, tilt: number, present: boolean): void {
-    const pouring = present && tilt > 0.5 && this.pondLevel > 0.05;
-    if (pouring) {
+    // Hysteresis: start pouring past 0.5 rad, keep going until the palm levels
+    // below 0.42, so a hand held near the threshold never makes the stream stutter.
+    const can = present && this.pondLevel > 0.05;
+    this.pouring = can && tilt > (this.pouring ? 0.42 : 0.5);
+    // The pond leans downhill a little before it spills.
+    const lean = Math.min(1, tilt / 0.5);
+    this.v1.copy(this.downhill).multiplyScalar(0.0022 * lean * lean);
+    this.slosh.lerp(this.v1, 1 - Math.exp(-dt * 5));
+    this.pond.position.set(this.pondHome.x + this.slosh.x, this.pondHome.y, this.pondHome.z + this.slosh.z);
+    if (this.pouring) {
       this.pondLevel = Math.max(0, this.pondLevel - dt * 0.025);
-      // Ribbon from pond centre to the rim along downhill.
-      const start = this.v1.set(this.pond.position.x, 0, this.pond.position.z);
-      const end = this.v2.copy(this.downhill).multiplyScalar(R * 0.98);
-      const len = start.distanceTo(end);
-      this.streamK = Math.min(1, this.streamK + dt * 3.5);
-      this.stream.visible = true;
-      // The stream runs out from the pond rather than appearing whole.
-      const reach = easeOutCubic(this.streamK);
-      this.stream.position.copy(start).lerp(end, 0.5 * reach).setY(0.0065);
-      this.stream.scale.set(Math.max(0.0001, len * reach), 1, (0.6 + Math.sin(this.time * 20) * 0.15) * (0.4 + 0.6 * reach));
-      this.stream.rotation.set(0, Math.atan2(-(end.z - start.z), end.x - start.x), 0);
-      // Water the fields the stream passes over.
+      // Follow the downhill direction smoothly so the stream sweeps, not jumps.
+      this.v2.copy(this.downhill).multiplyScalar(R * 0.98);
+      if (this.streamK < 0.02) this.streamEnd.copy(this.v2);
+      else this.streamEnd.lerp(this.v2, 1 - Math.exp(-dt * 7));
+      this.streamStart.set(this.pond.position.x, 0, this.pond.position.z);
+      this.streamK += (1 - this.streamK) * (1 - Math.exp(-dt * 5));
+      this.streamReach = Math.min(1, this.streamReach + dt * 1.6);
+      const start = this.streamStart;
+      const end = this.streamEnd;
+      const reach = easeOutCubic(this.streamReach);
+      // Water the fields the stream has reached.
       for (const f of this.fields) {
-        if (distToSegment(f.center, start, end) < 0.01) {
+        if (distToSegment(f.center, start, end) < 0.01 && reach > 0.5) {
           const before = f.wet;
           f.wet = Math.min(1, f.wet + dt * 0.8);
           if (before < 1 && f.wet >= 1) {
             sfx.pop();
             this.v3.copy(f.center).setY(GROUND_Y + 0.001);
             this.fx.burst(this.v3, 0x8fd3ff, 10, { speed: 0.025, up: 0.035, size: 0.0008 });
+            this.rainbowT = 7;
             if (this.wishType === 'water' && this.fields[this.wishField] === f) this.grantWish();
           }
         }
       }
-      // Spill droplets off the rim into the real world.
+      // Once the stream reaches the rim it falls off as a steady arc of droplets.
       this.dropNext -= dt;
-      if (this.dropNext <= 0) {
-        this.dropNext = 0.025;
+      if (this.dropNext <= 0 && reach > 0.97) {
+        this.dropNext = 0.03;
         this.v3.copy(end).setY(0.004);
         this.island.localToWorld(this.v3);
-        this.spawnDrop(this.v3);
+        // Carry the flow's outward direction into the fall.
+        this.v1.copy(this.downhill).transformDirection(this.island.matrixWorld);
+        this.spawnDrop(this.v3, this.v1);
         if (Math.random() < 0.15) sfx.splash();
       }
     } else {
-      // Thin out and vanish instead of blinking off.
-      this.streamK = Math.max(0, this.streamK - dt * 4);
-      this.stream.visible = this.streamK > 0.01;
-      this.stream.scale.z = 0.6 * this.streamK;
+      // A good pour leaves a rainbow behind as the palm levels out.
+      if (this.streamReach >= 1 && this.streamK > 0.5 && this.rainbowT <= 0) this.rainbowT = 7;
+      // Thin out and run dry instead of blinking off.
+      this.streamK *= Math.exp(-dt * 5);
+      if (this.streamK < 0.01) {
+        this.streamK = 0;
+        this.streamReach = 0;
+      }
       if (tilt < 0.3) this.pondLevel = Math.min(1, this.pondLevel + dt * 0.15);
     }
+    // Now and then a fish leaps from a calm, full pond.
+    const calm = present && tilt < 0.25 && this.pondLevel > 0.8 && this.night < 0.5 && this.save.step >= 2;
+    const leap = this.fish.update(dt, calm, this.pond.position.x, this.pond.position.z, 0.011 * this.pond.scale.x, GROUND_Y, this.v3);
+    if (leap > 0) {
+      this.fx.burst(this.v3, 0xbfe6ff, leap === 2 ? 7 : 4, { speed: 0.012, up: 0.03, gravity: 0.14, life: 0.5, size: 0.0005 });
+      this.ripples.spawn(this.v3.x - this.pondHome.x, this.v3.z - this.pondHome.z);
+      if (leap === 2) sfx.splash();
+    }
+    this.stream.update(this.streamStart, this.streamEnd, this.streamK, easeOutCubic(this.streamReach), this.time, 0.0065);
     const s = 0.35 + 0.65 * this.pondLevel;
-    const ps = this.pond.scale.x + (s - this.pond.scale.x) * (1 - Math.exp(-dt * 6));
+    const ps = this.pond.scale.x + (s - this.pond.scale.x) * (1 - Math.exp(-dt * 4));
     this.pond.scale.set(ps, ps, 1);
     for (const f of this.fields) {
       const m = f.wet > 0.6 ? M.fieldWet : M.fieldDry;
@@ -820,12 +876,15 @@ export class PalmSystem extends createSystem({}) {
     }
   }
 
-  private spawnDrop(worldPos: Vector3): void {
+  private spawnDrop(worldPos: Vector3, outward: Vector3): void {
     for (let i = 0; i < this.dropLife.length; i++) {
       if (this.dropLife[i] <= 0) {
         this.dropPos[i].copy(worldPos);
-        this.dropVel[i].set((Math.random() - 0.5) * 0.04, -0.02, (Math.random() - 0.5) * 0.04);
-        this.dropLife[i] = 1.2;
+        this.dropVel[i]
+          .copy(outward)
+          .multiplyScalar(0.05 + Math.random() * 0.015)
+          .add(this.v2.set((Math.random() - 0.5) * 0.012, 0, (Math.random() - 0.5) * 0.012));
+        this.dropLife[i] = 1.1;
         return;
       }
     }
@@ -837,8 +896,11 @@ export class PalmSystem extends createSystem({}) {
       this.dropLife[i] -= dt;
       this.dropVel[i].y -= 9.8 * dt * 0.6;
       this.dropPos[i].addScaledVector(this.dropVel[i], dt);
-      const s = this.dropLife[i] > 0 ? 1 : 0;
-      this.dropM.makeScale(s, s * 1.6, s).setPosition(this.dropPos[i]);
+      // Swell in as they leave the rim, stretch as they speed up, shrink away at the end.
+      const age = 1.1 - this.dropLife[i];
+      const s = this.dropLife[i] > 0 ? Math.min(1, age * 12) * Math.min(1, this.dropLife[i] * 5) : 0;
+      const stretch = 1 + Math.min(1.6, -this.dropVel[i].y * 0.9);
+      this.dropM.makeScale(s, s * stretch, s).setPosition(this.dropPos[i]);
       this.drops.setMatrixAt(i, this.dropM);
     }
     this.drops.instanceMatrix.needsUpdate = true;
@@ -941,6 +1003,7 @@ export class PalmSystem extends createSystem({}) {
     if (Math.hypot(x - p.x, z - p.z) < 0.014) return false;
     if (Math.hypot(x - HOUSE_SPOT.x, z - HOUSE_SPOT.z) < 0.009) return false;
     if (Math.hypot(x - HUT_SPOT.x, z - HUT_SPOT.z) < 0.009) return false;
+    if (Math.hypot(x - WINDMILL_SPOT.x, z - WINDMILL_SPOT.z) < 0.0075) return false;
     for (const f of this.fields) if (Math.hypot(x - f.center.x, z - f.center.z) < 0.009) return false;
     return true;
   }
@@ -1317,6 +1380,16 @@ export class PalmSystem extends createSystem({}) {
     const dusk = Math.max(0, this.night * 1.25 - 0.25) * this.reveal;
     this.nightDome.visible = dusk > 0.01;
     (this.nightDome.material as MeshBasicMaterial).opacity = dusk * 0.8;
+    this.nightSky.update(dt, dusk);
+    // The windmill is raised alongside the first wildflowers and turns in the breeze,
+    // faster when the island is being carried about.
+    this.windmillGrow = Math.min(1, Math.max(0, this.windmillGrow + (n >= UNLOCK_FLOWERS ? dt * 0.9 : -dt * 3)));
+    this.windmill.visible = this.windmillGrow > 0.001;
+    this.windmill.scale.setScalar(Math.max(0.0001, easeOutBack(this.windmillGrow)));
+    this.windmillSails.rotation.z -= dt * (1.5 + Math.min(6, this.anchorSpeed * 30));
+    // A rainbow follows fresh water, always turned to face the player.
+    if (this.rainbowT > 0) this.rainbowT -= dt;
+    this.rainbow.update(dt, this.rainbowT > 0 && this.night < 0.4 && present, Math.atan2(this.camLocal.x, this.camLocal.z));
     this.skyLanterns.update(dt, this.time);
     // Butterflies arrive with the first trees; at night they glow as fireflies.
     this.critters.update(this.time, this.night, this.reveal * Math.min(1, Math.max(0, this.save.step - 1)));
@@ -1432,7 +1505,7 @@ export class PalmSystem extends createSystem({}) {
       }
     }
     sfx.chime();
-    if (n === UNLOCK_FLOWERS) this.wishMsg = `Wish granted! \u2665 ${n}. Wildflowers bloom across the island`;
+    if (n === UNLOCK_FLOWERS) this.wishMsg = `Wish granted! \u2665 ${n}. Wildflowers bloom and the villagers build a windmill`;
     else if (n === UNLOCK_LANTERNS) this.wishMsg = `Wish granted! \u2665 ${n}. The villagers put up lanterns. Close your hand to see`;
     else if (n === UNLOCK_FESTIVAL) this.wishMsg = `\u2665 ${n}. Festival! ${this.placed ? 'Cover the island' : 'Close your hand'} tonight for fireworks`;
     else {
