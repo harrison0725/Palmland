@@ -33,6 +33,8 @@ export interface RaidHooks {
   feathers(at: Vector3): void;
   caw(): void;
   swat(combo: number): void;
+  /** Optional real-world entry point (island-local), such as the room's window. */
+  entry?(out: Vector3): boolean;
 }
 
 /** Crows read better a little larger than life next to the tiny villagers. */
@@ -131,11 +133,17 @@ export class CrowRaid {
           c.field = Math.floor(Math.random() * this.hooks.fieldCount);
           const a = Math.random() * Math.PI * 2;
           c.from.set(Math.cos(a) * R * 1.7, 0.045 + Math.random() * 0.02, Math.sin(a) * R * 1.7);
+          let far = 0;
+          if (this.hooks.entry?.(c.to)) {
+            // In through the real window, spread across its opening.
+            c.from.set(c.to.x + (Math.random() - 0.5) * 0.04, c.to.y + (Math.random() - 0.5) * 0.03, c.to.z + (Math.random() - 0.5) * 0.04);
+            far = Math.min(2.5, Math.hypot(c.from.x, c.from.z) * 4);
+          }
           const fc = this.hooks.fieldCenter(c.field);
           c.to.set(fc.x + (Math.random() - 0.5) * 0.008, GROUND_Y + 0.0035, fc.z + (Math.random() - 0.5) * 0.008);
           c.state = 1;
           c.t = 0;
-          c.dur = Math.max(1.4, 2.8 - this.wave * 0.25);
+          c.dur = Math.max(1.4, 2.8 - this.wave * 0.25) + far;
           c.obj.visible = true;
           if (Math.random() < 0.5) this.hooks.caw();
         }
@@ -240,6 +248,12 @@ export class CrowRaid {
   }
 
   /** Island-local position of the first busy crow, for scripted demos. */
+  /** Debug: the first active crow's state and island-local position. */
+  probe(): number[] | null {
+    const c = this.crows.find((k) => k.state !== 0);
+    return c ? [c.state, +c.pos.x.toFixed(3), +c.pos.y.toFixed(3), +c.pos.z.toFixed(3)] : null;
+  }
+
   target(out: Vector3): boolean {
     let best: Crow | null = null;
     for (const c of this.crows) {

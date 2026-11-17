@@ -287,13 +287,18 @@ export class SkyLanterns {
     this.alive = this.count;
   }
 
+  /** Island-local height of the real ceiling, when the room has been scanned. */
+  ceil = Infinity;
+
   update(dt: number, time: number): void {
     if (this.alive === 0) return;
+    const roof = Number.isFinite(this.ceil);
+    const life = roof ? 18 : SkyLanterns.LIFE;
     let any = 0;
     for (let i = 0; i < this.count; i++) {
       if (this.age[i] < 0) continue;
       this.age[i] += dt;
-      const t = this.age[i] / SkyLanterns.LIFE;
+      const t = this.age[i] / life;
       if (t >= 1) {
         this.age[i] = -1;
         this.mesh.setMatrixAt(i, ZERO);
@@ -302,7 +307,8 @@ export class SkyLanterns {
       any++;
       const p = this.pos[i];
       // Rise gently, drifting outward, slower as they climb.
-      p.y += dt * 0.014 * (1 - t * 0.5);
+      if (roof) p.y = Math.min(this.ceil - 0.004, p.y + dt * Math.max(0.014, (this.ceil - GROUND_Y) / 6) * (1 - t * 0.4));
+      else p.y += dt * 0.014 * (1 - t * 0.5);
       p.x += Math.sin(time * 0.8 + this.sway[i]) * dt * 0.003;
       p.z += Math.cos(time * 0.6 + this.sway[i]) * dt * 0.003;
       const grow = Math.min(1, this.age[i] * 2.5);

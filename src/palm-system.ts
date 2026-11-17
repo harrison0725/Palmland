@@ -249,6 +249,11 @@ export class PalmSystem extends createSystem({ planes: { required: [XRPlane] } }
   private readonly roamTo = new Vector3();
   private readonly pv = new Vector3();
   private readonly pq = new Quaternion();
+  private planeCount = -1;
+  private hasWindow = false;
+  private readonly windowW = new Vector3();
+  private ceilY = NaN;
+  private rideSide: Side = 'left';
   private readonly raidHits = [new Vector3(), new Vector3(), new Vector3(), new Vector3()];
   private readonly raidV = new Vector3();
   private lastWish: WishType | null = null;
@@ -354,6 +359,11 @@ export class PalmSystem extends createSystem({ planes: { required: [XRPlane] } }
     this.raid = new CrowRaid({
       fieldCount: this.fields.length,
       fieldCenter: (i) => this.fields[i].center,
+      entry: (out) => {
+        if (!this.hasWindow || !this.placed) return false;
+        this.content.worldToLocal(out.copy(this.windowW));
+        return true;
+      },
       steal: (i) => {
         const f = this.fields[i];
         f.growth = Math.max(0.15, f.growth - 0.3);
@@ -542,6 +552,7 @@ export class PalmSystem extends createSystem({ planes: { required: [XRPlane] } }
             const zs = pts.map((p) => +p.z.toFixed(2));
             return [pl.orientation, pl.semanticLabel, +o.getWorldPosition(new Vector3()).y.toFixed(2), Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)];
           }),
+        crowProbe: () => this.raid.probe(),
         roam: () => {
           this.roamWait = 0;
         },
@@ -708,6 +719,7 @@ export class PalmSystem extends createSystem({ planes: { required: [XRPlane] } }
     this.updateSteps(dt);
     this.updateWishes(dt, present);
     this.updateRaid(dt, present);
+    this.scanRoom();
     this.updateGround(dt);
     this.updateRoam(dt);
     this.debugLog(god);
@@ -1714,6 +1726,38 @@ export class PalmSystem extends createSystem({ planes: { required: [XRPlane] } }
     this.placedPos.y = best + 0.0068 * TABLE_SCALE;
   }
 
+  /** Remember the room's window and ceiling whenever the scanned planes change. */
+  private scanRoom(): void {
+    const n = this.queries.planes.entities.size;
+    if (n !== this.planeCount) {
+      this.planeCount = n;
+      this.hasWindow = false;
+      this.ceilY = NaN;
+      let bestW = Infinity;
+      for (const e of this.queries.planes.entities) {
+        const obj = e.object3D;
+        const pl = e.getValue(XRPlane, '_plane') as { orientation?: string; semanticLabel?: string } | undefined;
+        if (!obj || !pl) continue;
+        const label = (pl.semanticLabel || '').toLowerCase();
+        obj.getWorldPosition(this.pv);
+        if (label === 'ceiling') this.ceilY = this.pv.y;
+        else if (label.includes('window') && pl.orientation === 'vertical') {
+          const d = this.pv.lengthSq();
+          if (d < bestW) {
+            bestW = d;
+            this.windowW.copy(this.pv);
+            this.hasWindow = true;
+          }
+        }
+      }
+    }
+    // Festival lanterns drift up to the real ceiling and gather there.
+    if (this.placed && this.placeK > 0.99 && Number.isFinite(this.ceilY)) {
+      this.content.worldToLocal(this.pv.set(this.placedPos.x, this.ceilY, this.placedPos.z));
+      this.skyLanterns.ceil = this.pv.y;
+    } else this.skyLanterns.ceil = Infinity;
+  }
+
   /** On a real surface the floating rock settles flat and the roots tuck away. */
   private updateGround(dt: number): void {
     if (!this.placed) this.surfaceY = NaN;
@@ -1850,6 +1894,60 @@ export class PalmSystem extends createSystem({ planes: { required: [XRPlane] } }
           sfx.chime();
         }
       }
+    } else if (this.roamPhase === 3 && this.handNearRoamer(v, parent)) {
+      // A flat hand laid on the table: the explorer hops aboard.
+      this.roamFrom.copy(v.pos);
+      this.ridePoint(parent);
+      this.roamTo.copy(this.pv);
+      this.roamTo.y -= 0.006;
+      this.roamT = 0;
+      this.roamPhase = 6;
+    } else if (this.roamPhase === 6) {
+      this.roamT += dt / 0.6;
+      const t = Math.min(1, this.roamT);
+      this.ridePoint(parent);
+      this.roamTo.copy(this.pv);
+      this.roamTo.y -= 0.006;
+      v.pos.lerpVectors(this.roamFrom, this.roamTo, t);
+      v.obj.position.set(v.pos.x, 0.006 + v.pos.y + 4 * t * (1 - t) * 0.01, v.pos.z);
+      if (t >= 1) {
+        this.roamPhase = 7;
+        this.roamT = 0;
+        sfx.pop();
+        sfx.chime();
+        this.v3.copy(v.obj.position);
+        this.fx.burst(this.v3, 0xf2b134, 8, { speed: 0.02, up: 0.03 });
+      }
+    } else if (this.roamPhase === 7) {
+      // Riding along on the giant hand. Bring it back over the island to drop them home.
+      this.roamT += dt;
+      this.raidMsg = 'A villager climbed onto your hand! Carry them back over the island';
+      this.raidMsgT = Math.max(this.raidMsgT, 0.3);
+      const h = this.hands[this.rideSide];
+      if (!h.tracked || this.roamT > 14) {
+        this.roamIdx = -1;
+        this.roamPhase = 0;
+        v.pos.set(0, 0.03, 0.01);
+        v.vel.set(0, 0, 0);
+        v.vy = 0;
+        return;
+      }
+      this.ridePoint(parent);
+      v.pos.copy(this.pv);
+      v.pos.y -= 0.006;
+      v.obj.position.copy(this.pv);
+      v.obj.position.y += Math.abs(Math.sin(this.time * 6)) * 0.002;
+      v.obj.rotation.y += dt * 1.5;
+      v.obj.scale.set(1, 1, 1);
+      const dx = h.palmCenter.x - this.placedPos.x;
+      const dz = h.palmCenter.z - this.placedPos.z;
+      if (Math.hypot(dx, dz) < R * TABLE_SCALE * 0.75 && h.palmCenter.y < this.placedPos.y + 0.14 && this.roamT > 1) {
+        this.roamFrom.copy(v.pos);
+        this.roamTo.set(v.pos.x * 0.5, 0, v.pos.z * 0.5);
+        if (Math.hypot(this.roamTo.x, this.roamTo.z) > R * 0.7) this.roamTo.multiplyScalar((R * 0.7) / Math.hypot(this.roamTo.x, this.roamTo.z));
+        this.roamT = 0;
+        this.roamPhase = 5;
+      }
     } else if (this.roamPhase === 3) {
       if (this.roamT > 0) {
         // Stop and marvel: look around, with a happy hop.
@@ -1873,6 +1971,28 @@ export class PalmSystem extends createSystem({ planes: { required: [XRPlane] } }
     } else if (this.roamPhase === 4) {
       if (this.roamWalk(v, this.roamTo, this.roamY, dt)) this.roamHop(v, R * 0.8, 0, 5);
     }
+  }
+
+  /** Is a flat hand resting on the table right next to the explorer? */
+  private handNearRoamer(v: Villager, parent: Object3D): boolean {
+    if (this.roamT > 0 && this.roamLegs === 0) return false;
+    parent.localToWorld(this.v3.copy(v.obj.position));
+    for (const s of SIDES) {
+      const h = this.hands[s];
+      if (!h.tracked || h.openness < 0.7 || h.pinching) continue;
+      if (Math.abs(h.palmCenter.y - this.surfaceY) > 0.07) continue;
+      if (Math.hypot(h.palmCenter.x - this.v3.x, h.palmCenter.z - this.v3.z) > 0.16) continue;
+      this.rideSide = s;
+      return true;
+    }
+    return false;
+  }
+
+  /** Where a rider stands on the hand, in the villagers' frame: the palm if it faces up, else the back of the hand. */
+  private ridePoint(parent: Object3D): void {
+    const h = this.hands[this.rideSide];
+    this.pv.copy(h.palmCenter).addScaledVector(h.palmNormal, h.palmNormal.y > 0 ? 0.012 : -0.02);
+    parent.worldToLocal(this.pv);
   }
 
   private roamHop(v: Villager, r: number, y: number, phase: number): void {
