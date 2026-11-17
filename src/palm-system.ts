@@ -38,6 +38,7 @@ import {
 import { Label } from './label.js';
 import { HandSkeleton } from './hand-skeleton.js';
 import { sfx } from './sfx.js';
+import { Critters, Fireworks, SkyLanterns, buildNightDome } from './life.js';
 import {
   buildFlowers,
   buildLanternRing,
@@ -134,7 +135,7 @@ const FIELD_SPOTS: [number, number, number][] = [
   [-0.008, 0.032, 0.1],
 ];
 const SIDES: Side[] = ['left', 'right'];
-const FIREWORK_COLORS = [0xff6f91, 0xffd84a, 0x7ad7ff, 0xb48cff, 0x8cff9e];
+const FIREWORK_COLORS = [0xff2d6f, 0xffc400, 0x2fb8ff, 0xa24dff, 0x2fff7a, 0xff7a1a];
 const HOUSE_SPOT = new Vector3(0.024, 0, -0.022);
 const HUT_SPOT = new Vector3(-0.028, 0, -0.02);
 
@@ -213,6 +214,15 @@ export class PalmSystem extends createSystem({}) {
   private flowerGrow = 0;
   private lanternGrow = 0;
   private fireworkT = 0;
+  private critters!: Critters;
+  private fireworks!: Fireworks;
+  private skyLanterns!: SkyLanterns;
+  private nightDome!: Mesh;
+  private lanternT = 0;
+  private smokeT = 0;
+  /** Seconds of village-wide cheering left after a wish is granted. */
+  private cheerT = 0;
+  private festival = false;
   private reveal = 0;
   private night = 0;
   private nightHold = 0;
@@ -229,6 +239,7 @@ export class PalmSystem extends createSystem({}) {
   private readonly v1 = new Vector3();
   private readonly v2 = new Vector3();
   private readonly v3 = new Vector3();
+  private readonly v3b = new Vector3();
   private readonly q1 = new Quaternion();
   private readonly m1 = new Matrix4();
   private readonly originM = new Matrix4();
@@ -340,6 +351,16 @@ export class PalmSystem extends createSystem({}) {
     this.flowerGrow = this.save.wishes >= UNLOCK_FLOWERS ? 1 : 0;
     this.lanternGrow = this.save.wishes >= UNLOCK_LANTERNS ? 1 : 0;
 
+    this.critters = new Critters(9, R);
+    this.content.add(this.critters.mesh);
+    this.fireworks = new Fireworks();
+    this.content.add(this.fireworks.mesh);
+    this.skyLanterns = new SkyLanterns();
+    this.nightDome = buildNightDome(0.24);
+    this.nightDome.position.y = 0.05;
+    this.content.add(this.nightDome);
+    this.content.add(this.skyLanterns.mesh);
+
     this.fx = new Particles();
     this.content.add(this.fx.mesh);
     this.ripples = new Ripples();
@@ -423,6 +444,7 @@ export class PalmSystem extends createSystem({}) {
         state: () => ({ step: this.save.step, trees: this.trees.length, held: this.heldIdx, night: this.night, wishes: this.save.wishes, placed: this.placed }),
         wish: () => ({ type: this.wishType, idx: this.wishIdx, wishes: this.save.wishes }),
         place: () => ({ placed: this.placed, k: this.placeK, pos: this.islandEntityRoot.position.toArray() }),
+        setDown: () => this.setDown(),
         setWishes: (n: number) => {
           this.save.wishes = n;
         },
@@ -725,7 +747,8 @@ export class PalmSystem extends createSystem({}) {
     this.tmpColor.set(0xffb27a).lerp(this.v3c(0xfff1d6), Math.min(1, day * 1.4));
     this.sun.color.copy(this.tmpColor);
     this.hemi.intensity = 0.25 + 1.0 * day;
-    this.ambient.intensity = 0.2 + 0.4 * this.night;
+    this.ambient.intensity = 0.2 + 0.4 * this.night + this.fireworks.flash * 0.5;
+    this.ambient.color.set(0xffffff).lerp(this.fireworks.flashColor, Math.min(1, this.fireworks.flash));
     M.lantern.emissiveIntensity = Math.max(0, this.night * 3 - 0.6);
     for (const l of this.lanternLights) l.intensity = Math.max(0, this.night - 0.3) * 0.02;
     (this.stars.material as PointsMaterial).opacity = Math.max(0, this.night * 1.6 - 0.6);
@@ -1053,6 +1076,18 @@ export class PalmSystem extends createSystem({}) {
           v.obj.rotation.y += dd * (1 - Math.exp(-dt * 6));
           v.obj.rotation.z = Math.sin(this.time * 9 + i * 1.3) * 0.18;
           if (v.hop <= 0 && v.pos.y <= 0 && Math.random() < dt * 0.7) v.hop = 1;
+        } else if (this.festival) {
+          // Festival night: dance on the spot, hopping to a shared beat.
+          this.v3.set(0, 0, 0);
+          const beat = this.time * 2.2 + (i % 2) * 0.5;
+          v.obj.rotation.y += dt * 3.2 * (i % 2 ? 1 : -1);
+          v.obj.rotation.z = Math.sin(beat * Math.PI) * 0.22;
+          if (v.hop <= 0 && v.pos.y <= 0 && beat % 1 < 0.12) v.hop = 1;
+        } else if (this.cheerT > 0) {
+          // Someone's wish came true: everybody jumps for joy.
+          this.v3.set(0, 0, 0);
+          v.obj.rotation.z = Math.sin(this.time * 12 + i * 1.3) * 0.2;
+          if (v.hop <= 0 && v.pos.y <= 0 && Math.random() < dt * 3.5) v.hop = 1;
         } else if (v.idle > 0) {
           // Stand and look around for a moment between strolls.
           v.idle -= dt;
@@ -1257,19 +1292,42 @@ export class PalmSystem extends createSystem({}) {
     this.lanternRing.visible = this.lanternGrow > 0.01;
     this.lanternRing.scale.set(1, Math.max(0.001, this.lanternGrow), 1);
     this.lanternRing.position.y = GROUND_Y * (1 - this.lanternGrow);
-    // Festival: fireworks over the island on any night once the village is happy.
-    if (n >= UNLOCK_FESTIVAL && this.night > 0.8 && present) {
+    // Festival: once the village is happy, any night brings rockets that burst
+    // high above the island, lanterns released into the room, and dancing.
+    this.festival = n >= UNLOCK_FESTIVAL && this.night > 0.8 && present;
+    if (this.festival) {
       this.fireworkT -= dt;
       if (this.fireworkT <= 0) {
-        this.fireworkT = 0.7 + Math.random() * 0.9;
+        this.fireworkT = 0.3 + Math.random() * 0.45;
         const a = Math.random() * Math.PI * 2;
-        const d = Math.random() * R * 0.6;
-        this.v3.set(Math.cos(a) * d, 0.04 + Math.random() * 0.025, Math.sin(a) * d);
+        const d = Math.random() * R * 0.7;
         const col = FIREWORK_COLORS[Math.floor(Math.random() * FIREWORK_COLORS.length)];
-        this.fx.burst(this.v3, col, 16, { speed: 0.05, up: 0.01, gravity: 0.03, life: 1.1, size: 0.0008 });
-        sfx.pop();
+        this.fireworks.launch(Math.cos(a) * d, Math.sin(a) * d, col, 0.065 + Math.random() * 0.05);
+        sfx.pick();
+      }
+      this.lanternT -= dt;
+      if (this.lanternT <= 0 && this.villagers.length > 0) {
+        this.lanternT = 0.45 + Math.random() * 0.5;
+        const v = this.villagers[Math.floor(Math.random() * this.villagers.length)];
+        this.skyLanterns.release(v.pos.x, v.pos.z);
       }
     }
+    if (this.fireworks.update(dt)) sfx.pop();
+    // Night gathers behind the island so lanterns and fireworks glow against it.
+    const dusk = Math.max(0, this.night * 1.25 - 0.25) * this.reveal;
+    this.nightDome.visible = dusk > 0.01;
+    (this.nightDome.material as MeshBasicMaterial).opacity = dusk * 0.8;
+    this.skyLanterns.update(dt, this.time);
+    // Butterflies arrive with the first trees; at night they glow as fireflies.
+    this.critters.update(this.time, this.night, this.reveal * Math.min(1, Math.max(0, this.save.step - 1)));
+    // A lived-in hut puffs chimney smoke by day.
+    this.smokeT -= dt;
+    if (this.smokeT <= 0 && this.hutGrow > 0.95 && this.night < 0.5 && present) {
+      this.smokeT = 0.55;
+      this.v3.set(this.hut.position.x + 0.002, GROUND_Y + 0.011, this.hut.position.z);
+      this.fx.burst(this.v3, 0xe9e9e9, 1, { speed: 0.002, up: 0.012, gravity: -0.004, life: 1.8, size: 0.0011 });
+    }
+    if (this.cheerT > 0) this.cheerT -= dt;
 
     if (this.wishMsgT > 0) this.wishMsgT -= dt;
     const active = this.save.step >= 6 && present && this.reveal > 0.9;
@@ -1360,7 +1418,19 @@ export class PalmSystem extends createSystem({}) {
       if (v) v.hop = 1;
       this.v3.set(v.obj.position.x, v.obj.position.y + 0.008, v.obj.position.z);
     }
-    this.fx.burst(this.v3, 0xff6f91, 12, { speed: 0.02, up: 0.05, gravity: 0.02, life: 1.0, size: 0.0008 });
+    this.fx.burst(this.v3, 0xff6f91, 14, { speed: 0.02, up: 0.05, gravity: 0.02, life: 1.0, size: 0.0009 });
+    this.fx.burst(this.v3, 0xffd84a, 8, { speed: 0.035, up: 0.03, gravity: 0.03, life: 0.8, size: 0.0006 });
+    // The whole village celebrates, not just the one who asked.
+    this.cheerT = 2.2;
+    const milestone = n === UNLOCK_FLOWERS || n === UNLOCK_LANTERNS || n === UNLOCK_FESTIVAL;
+    if (milestone) {
+      this.cheerT = 4;
+      for (let k = 0; k < 5; k++) {
+        const a = (k / 5) * Math.PI * 2;
+        this.v3b.set(Math.cos(a) * R * 0.5, GROUND_Y + 0.004, Math.sin(a) * R * 0.5);
+        this.fx.burst(this.v3b, FIREWORK_COLORS[k % FIREWORK_COLORS.length], 9, { speed: 0.03, up: 0.07, gravity: 0.06, life: 1.3, size: 0.0008 });
+      }
+    }
     sfx.chime();
     if (n === UNLOCK_FLOWERS) this.wishMsg = `Wish granted! \u2665 ${n}. Wildflowers bloom across the island`;
     else if (n === UNLOCK_LANTERNS) this.wishMsg = `Wish granted! \u2665 ${n}. The villagers put up lanterns. Close your hand to see`;

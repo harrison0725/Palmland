@@ -43,7 +43,11 @@ export default async function run({ page, frame, cdp }) {
 // Runs in the page.
 async function applyFrame({ n, fps }) {
   const d = window.IWER_DEVICE;
-  const R = d.remote;
+  const R0 = d.remote;
+  const S0 = (window.__filmState ??= {});
+  S0.last ??= {};
+  // Skip dispatches that repeat the previous frame: each one costs real time.
+  const R = { dispatch: async (cmd, arg) => { if (cmd === 'set_transform') { const k = JSON.stringify(arg); if (S0.last[arg.device] === k) return; S0.last[arg.device] = k; } return R0.dispatch(cmd, arg); } };
   const f = window.__film;
   const api = f.api;
   const t = n / fps;
@@ -128,11 +132,11 @@ async function applyFrame({ n, fps }) {
       // Cover the resting island with a flat hand for night, then lift away.
       const cover = add(S.ppos, [-0.1, 0.22, -0.02]);
       const b = S.t3 + 2;
-      wrist = lerp3(wrist, cover, seg(b, b + 1.6) - seg(b + 8.5, b + 10));
+      wrist = lerp3(wrist, cover, seg(b, b + 1.6) - seg(b + 11.5, b + 13));
       palm = [0, -1, 0];
       fingers = norm(FING);
       // Scoop it back up with an open palm.
-      const c = S.t3 + 17.5;
+      const c = S.t3 + 20.5;
       const under = add(S.ppos, [-0.03, -0.13, 0.1]);
       const turnUp = seg(c, c + 1.2);
       if (turnUp > 0) {
@@ -150,11 +154,11 @@ async function applyFrame({ n, fps }) {
     let pitch = lerp(HEAD0.pitch, HEAD1.pitch, seg(a + 1, a + 4));
     let yaw = lerp(HEAD0.yaw, HEAD1.yaw, seg(a + 1, a + 4));
     if (S.t3 && S.ppos) {
-      const l = S.t3 + 12.5;
+      const l = S.t3 + 15.5;
       const lean = seg(l, l + 1.5) - seg(l + 3.8, l + 5);
       hp = lerp3(hp, add(S.ppos, [0, 0.3, 0.3]), lean);
       pitch = lerp(pitch, -45, lean);
-      const back = seg(S.t3 + 21, S.t3 + 23.2);
+      const back = seg(S.t3 + 24, S.t3 + 26.2);
       hp = lerp3(hp, HEAD0.p, back);
       pitch = lerp(pitch, HEAD0.pitch, back);
       yaw = lerp(yaw, HEAD0.yaw, back);
