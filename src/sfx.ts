@@ -41,5 +41,13 @@ export const sfx = {
   grow: () => {
     [330, 440, 550, 660, 880].forEach((f, i) => tone(f, 0.35, 'triangle', 0.06, 0, i * 0.06));
   },
+  caw: () => {
+    tone(620, 0.16, 'sawtooth', 0.05, -300);
+    tone(560, 0.14, 'sawtooth', 0.04, -260, 0.18);
+  },
+  swat: (combo: number) => {
+    tone(160, 0.08, 'square', 0.07, -80);
+    tone(500 + Math.min(combo, 8) * 90, 0.12, 'triangle', 0.09, 300, 0.03);
+  },
   unlock: () => ac(),
 };

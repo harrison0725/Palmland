@@ -46,9 +46,11 @@ export const M = {
     emissiveIntensity: 0,
   }),
   skin: mat(0xf0c49b),
+  sail: mat(0xfff7e6),
+  fish: mat(0xff8a3c, { roughness: 0.35 } as Partial<MeshStandardMaterial>),
 };
 
-const villagerColors = [0xe85d75, 0x4a7fe8, 0xf2b134, 0x8a5ce8, 0x2fbf9f];
+const villagerColors = [0xe85d75, 0x4a7fe8, 0xf2b134, 0x8a5ce8, 0x2fbf9f, 0xf07a3a, 0x5cb85c, 0xd96ad1];
 
 /** Deterministic pseudo-random so every player gets the same island. */
 export function rng(seed: number) {
@@ -212,4 +214,78 @@ export function buildCloud(seed: number): Group {
 
 export function lerpColor(out: Color, a: number, b: number, t: number) {
   out.set(a).lerp(new Color(b), t);
+}
+
+/**
+ * The windmill the villagers build once a few wishes have come true.
+ * Origin on the ground at the tower centre, front (+Z) carries the sails.
+ * The child named `Sails` spins about its local Z.
+ */
+export function buildWindmill(): Group {
+  const g = new Group();
+  g.name = 'Windmill';
+  const tower = new Mesh(new CylinderGeometry(0.0021, 0.0036, 0.011, 8), M.wall);
+  tower.name = 'Tower';
+  tower.position.y = 0.0055;
+  g.add(tower);
+  // A stone footing so the tower sits in the grass rather than on it.
+  const foot = new Mesh(new CylinderGeometry(0.0039, 0.0042, 0.0012, 8), M.rock);
+  foot.name = 'Footing';
+  foot.position.y = 0.0006;
+  g.add(foot);
+  const cap = new Mesh(new ConeGeometry(0.003, 0.0038, 8), M.roof);
+  cap.name = 'Cap';
+  cap.position.y = 0.0128;
+  g.add(cap);
+  const door = new Mesh(new BoxGeometry(0.0018, 0.003, 0.0005), M.trunk);
+  door.name = 'Door';
+  door.position.set(0, 0.0015, 0.0034);
+  g.add(door);
+  const axle = new Mesh(new CylinderGeometry(0.0005, 0.0005, 0.002, 6), M.trunk);
+  axle.name = 'Axle';
+  axle.rotation.x = Math.PI / 2;
+  axle.position.set(0, 0.0102, 0.0028);
+  g.add(axle);
+  const sails = new Group();
+  sails.name = 'Sails';
+  sails.position.set(0, 0.0102, 0.0039);
+  const hub = new Mesh(new CylinderGeometry(0.0009, 0.0009, 0.0006, 8), M.trunk);
+  hub.rotation.x = Math.PI / 2;
+  sails.add(hub);
+  for (let i = 0; i < 4; i++) {
+    const arm = new Group();
+    arm.rotation.z = (i * Math.PI) / 2;
+    const spar = new Mesh(new BoxGeometry(0.0004, 0.0078, 0.0004), M.trunk);
+    spar.position.y = 0.0039;
+    arm.add(spar);
+    // The cloth sits to one side of the spar, like a real sail frame.
+    const cloth = new Mesh(new BoxGeometry(0.0017, 0.0056, 0.00022), M.sail);
+    cloth.position.set(0.00105, 0.0048, 0);
+    arm.add(cloth);
+    sails.add(arm);
+  }
+  g.add(sails);
+  return g;
+}
+
+/** A small pond fish, nose toward +Z, origin at its middle. */
+export function buildFish(): Group {
+  const g = new Group();
+  g.name = 'Fish';
+  const body = new Mesh(new SphereGeometry(0.001, 8, 6), M.fish);
+  body.name = 'Body';
+  body.scale.set(0.7, 0.9, 1.9);
+  g.add(body);
+  const tail = new Mesh(new ConeGeometry(0.0009, 0.0013, 4), M.fish);
+  tail.name = 'Tail';
+  tail.rotation.x = Math.PI / 2;
+  tail.scale.x = 0.35;
+  tail.position.z = -0.0022;
+  g.add(tail);
+  const fin = new Mesh(new ConeGeometry(0.0005, 0.0009, 3), M.fish);
+  fin.name = 'Fin';
+  fin.scale.x = 0.3;
+  fin.position.set(0, 0.001, 0.0002);
+  g.add(fin);
+  return g;
 }

@@ -11,6 +11,7 @@
         position: fixed; left: 0; right: 0; bottom: 0; padding: 24px 16px 32px;
         display: flex; flex-direction: column; align-items: center; gap: 10px;
         color: #2b2a33; text-align: center; pointer-events: none;
+        background: linear-gradient(rgba(244, 239, 228, 0), #f4efe4 22%);
       }
       #intro h1 { margin: 0; font-size: 32px; letter-spacing: 0.5px; }
       #intro p { margin: 0; max-width: 520px; line-height: 1.4; }
@@ -21,6 +22,16 @@
       }
       #enter:hover { background: #357a3f; }
       #hint { font-size: 14px; opacity: 0.75; }
+      #how {
+        display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+        max-width: 640px; margin: 4px 0 2px; padding: 0; list-style: none; font-size: 14px;
+      }
+      #how li {
+        background: rgba(255, 255, 255, 0.78); border-radius: 12px; padding: 8px 10px;
+        line-height: 1.3; box-shadow: 0 1px 3px rgba(43, 42, 51, 0.12);
+      }
+      #how b { display: block; font-size: 15px; }
+      @media (max-width: 560px) { #how { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
       body.in-xr #intro { display: none; }
     </style>
   </head>
@@ -29,6 +40,14 @@
     <div id="intro">
       <h1>Palmlands</h1>
       <p>A tiny world that grows on the palm of your hand.</p>
+      <ul id="how" aria-label="How to play">
+        <li><b>Palm up</b>an island grows on your hand</li>
+        <li><b>Poke</b>plant trees with a fingertip</li>
+        <li><b>Tilt</b>pour the pond onto the fields</li>
+        <li><b>Close your hand</b>night falls, crops grow</li>
+        <li><b>Pinch</b>carry villagers and grant wishes</li>
+        <li><b>Flip your palm</b>set the island down in your room</li>
+      </ul>
       <button id="enter" type="button">Enter mixed reality</button>
       <p id="hint">Checking for a headset…</p>
     </div>

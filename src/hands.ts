@@ -21,6 +21,7 @@ const JOINTS = [
   'middle-finger-metacarpal',
 ] as const;
 type JointName = (typeof JOINTS)[number];
+const TIPS = ['index-finger-tip', 'middle-finger-tip', 'ring-finger-tip', 'pinky-finger-tip'] as const;
 
 export class HandState {
   tracked = false;
@@ -45,6 +46,7 @@ export class HandState {
   private readonly tmpQ = new Quaternion();
   private readonly tmpV = new Vector3();
   private readonly tmpM = new Matrix4();
+  private readonly tmpQ2 = new Quaternion();
   private initialised = false;
 
   constructor(readonly side: Side) {
@@ -85,7 +87,7 @@ export class HandState {
         const o = pose.transform.orientation;
         this.tmpQ.set(o.x, o.y, o.z, o.w);
         this.tmpM.extractRotation(origin);
-        this.tmpQ.premultiply(new Quaternion().setFromRotationMatrix(this.tmpM));
+        this.tmpQ.premultiply(this.tmpQ2.setFromRotationMatrix(this.tmpM));
         palmQuat = this.tmpQ;
       }
     }
@@ -122,12 +124,7 @@ export class HandState {
 
     const size = Math.max(0.03, wrist.distanceTo(knuckle));
     let sum = 0;
-    for (const t of [
-      'index-finger-tip',
-      'middle-finger-tip',
-      'ring-finger-tip',
-      'pinky-finger-tip',
-    ] as const) {
+    for (const t of TIPS) {
       sum += this.get(t).distanceTo(this.palmCenter);
     }
     const ratio = sum / 4 / size; // ~1.5 open, ~0.6 fist
