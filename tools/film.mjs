@@ -47,7 +47,7 @@ async function applyFrame({ n, fps }) {
   const S0 = (window.__filmState ??= {});
   S0.last ??= {};
   // Skip dispatches that repeat the previous frame: each one costs real time.
-  const R = { dispatch: async (cmd, arg) => { if (cmd === 'set_transform') { const k = JSON.stringify(arg); if (S0.last[arg.device] === k) return; S0.last[arg.device] = k; } return R0.dispatch(cmd, arg); } };
+  const R = { dispatch: async (cmd, arg) => { if (cmd === 'set_transform' && arg.device !== 'hand-right') { const k = JSON.stringify(arg); if (S0.last[arg.device] === k) return; S0.last[arg.device] = k; } return R0.dispatch(cmd, arg); } };
   const f = window.__film;
   const api = f.api;
   const t = n / fps;
